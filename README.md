@@ -28,6 +28,17 @@ wipe-all <appid> [--blank] [--force]         wipe an entire bucket
 guards add|rm|ls <appid>   maintained never-touch list (steamcloudtamper.json)
 inject <uid3> <appid> <file> [remote-name]   local user drop + remotecache.vdf regen
 lock/unlock <uid3> <appid>  isolate a bucket locally (see Strategy 2 below)
+
+web lane (needs SCT_COOKIE session cookie):
+    web ls | files <appid> | dl <appid> <file> [outfile]
+    -> reads https://store.steampowered.com/account/remotestorage pages (game list,
+       per-app file listings, downloads). Read-only lane for buckets UFS refuses to touch.
+
+ferry (park saves into the owned AppID 480 / Spacewar bucket):
+    ferry ls | upload <local-file> [name] | dl <name> [outfile]
+    Parking names are stored as "<origAppId>_<name>". Since every Steam account owns
+    Spacewar, its UFS bucket is a safe parallel parking lot when the original game's
+    bucket is server-blocked.
 ```
 
 Auth: anonymous by default; set `SCT_USER` / `SCT_PASS` for account-scoped operations (probe/wipe of unowned buckets requires this because anonymous enumeration is denied).
@@ -58,3 +69,11 @@ Windows won't create a folder where a file with the exact same name exists. `loc
 
 ### Strategy 3 - "console tricks"
 `steam://open/console` commands like `download_depot <AppID>` or any `settingcloudaudit` do NOT exist / do not do what the casual writeups claim (`download_depot` fetches game files, unrelated to cloud saves). The only real per-bucket client switches are: Steam settings > Cloud per-app toggles (owned apps), the lockfile above, and CloudRedirect hiding.
+
+## Research notes (why these lanes exist)
+
+- **760 pollution confirmed by multiple RE projects**: SteamTools rewrote cloud requests for non-owned games to AppID 760 (Screenshots) without per-game prefixes - so saves collide across games and get mirrored into each injected app's userdata. STFixer/CloudRedirect and this repo all started from the same mess.
+- **Valve patch (Apr 2025)**: cloud UFS for non-owned AppIDs now returns `AccessDenied` on enumerate/upload/delete. Existing tests confirmed: even enumeration is denied.
+- **Retail SteamCloudFileManager**: deletes via web/ISteamRemoteStorage are physically rejected server side for special internal appids (e.g. 760/7); they resort to CDP-hijacked read-only web sessions for those. This is why the web lane here is read-only by design.
+- **Old "conflict dialog" trick** (zero-out files, delete remotecache.vdf, resume the conflict dialog with "upload nothing"): predates the 2025 patch; only really viable for owned games and fake-succeeds on unowned ones.
+- The web lane + ferry park + local lockout + Steam Support request are the four lanes for stuck unowned buckets right now; client-hook (CloudRedirect-style DLL) and app emulator (gbe_fork) builds are planned later lanes to fake the ownership context end-to-end.
