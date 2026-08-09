@@ -1,4 +1,5 @@
 ﻿using SteamCloudTamper.Core;
+using SteamCloudTamper.Core.Pool;
 using SteamCloudTamper.Core.Steam;
 using SteamCloudTamper.Engines;
 
@@ -10,6 +11,8 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        Branding.PrintToConsole();
+
         var config = AppConfig.Load(ConfigPath);
         var cmd = args.Length == 0 ? "help" : args[0].ToLowerInvariant();
 
@@ -29,6 +32,11 @@ public static class Program
                 "relocate" => RelocateBucket(args, config),
                 "web" => await WebCloud(args, config),
                 "ferry" => await FerryCmd(args, config),
+                "pool" => await PoolCmd(args, config),
+                "park" => await ParkCmd(args, config),
+                "unpark" => await UnparkCmd(args, config),
+                "rebuild" => RebuildCmd(args, config),
+                "barcode" => BarcodeCmd(args, config),
                 _ => Help()
             };
         }
@@ -67,10 +75,33 @@ public static class Program
         {
             Console.WriteLine($"  [{b.AppId}] {b.Era,-20} {b.Files.Count} files, {b.TotalBytes}b  {b.Note}");
             foreach (var f in b.Files)
-                Console.WriteLine($"      {f.FileName} ({f.FileSize}b)");
+            {
+                var tag = "";
+                var filePath = Path.Combine(steam, "userdata", "?", b.AppId.ToString());
+                // best-effort tag check against every account dir
+                tag = QuickTag(steam, b.AppId, f.FileName);
+                Console.WriteLine($"      {f.FileName} ({f.FileSize}b){tag}");
+            }
         }
 
         return 0;
+    }
+
+    private static string QuickTag(string steam, uint appId, string fileName)
+    {
+        var userdata = Path.Combine(steam, "userdata");
+        if (!Directory.Exists(userdata)) return "";
+        foreach (var account in Directory.EnumerateDirectories(userdata))
+        {
+            var path = Path.Combine(account, appId.ToString(), fileName);
+            if (!File.Exists(path)) continue;
+            var info = new FileInfo(path);
+            if (info.Length < Barcode.TailWindowBytes) continue;
+            var tail = ReadTail(path, Math.Min(info.Length, Barcode.TailWindowBytes));
+            if (Barcode.TryDecodeTail(tail, out var payload, out _))
+                return $"  tag={payload}";
+        }
+        return "";
     }
 
     private static async Task<int> RemoteList(string[] args, AppConfig config)
@@ -455,6 +486,260 @@ await using var session = await ConnectSessionAsync();
         return session;
     }
 
+    private static async Task<int> PoolCmd(string[] args, AppConfig config)
+    {
+        var sub = args.Length > 1 ? args[1].ToLowerInvariant() : "list";
+        switch (sub)
+        {
+            case "list":
+            {
+                Console.WriteLine("Parking pool (owned-game buckets are NEVER selected):");
+                foreach (var p in PoolDb.DefaultPool
+                             .OrderBy(p => p.Tier).ThenBy(p => p.AppId))
+                {
+                    var state = p.State.ToString().ToLowerInvariant();
+                    Console.WriteLine($"  [{p.Tier}] {p.AppId,-8} {p.Name,-32} {(p.IsFree ? "free" : "PAID")} {p.ReleaseYear} {state,-18} {p.Note}");
+                }
+                return 0;
+            }
+            case "refresh":
+            {
+                Console.WriteLine($"Refreshing pool metadata from the store API ({PoolDb.DefaultPool.Count} apps)...");
+                var progress = new Progress<(uint, AppDetails)>(
+                    r => Console.WriteLine($"  {r.Item1}: {r.Item2.Name} (free={r.Item2.IsFree}, {r.Item2.ReleaseDate})"));
+                var results = await StoreApi.RefreshPoolAsync(
+                    PoolDb.DefaultPool.Select(p => p.AppId), progress);
+                var ok = results.Count(r => r.Details.Found);
+                Console.WriteLine($"{ok}/{results.Count} resolved.");
+                return 0;
+            }
+            default:
+                Console.WriteLine("usage: pool list | refresh");
+                return 1;
+        }
+    }
+
+    private static async Task<int> ParkCmd(string[] args, AppConfig config)
+    {
+        if (args.Length < 3 || !uint.TryParse(args[1], out var uid) || !uint.TryParse(args[2], out var gameAppId))
+        {
+            Console.WriteLine("usage: park <uid3> <gameAppId> [--force] [--offline]   (parks all local bucket files with barcode trailers)");
+            return 1;
+        }
+
+        var offline = Has(args, "--offline");
+        var steam = ResolveSteam(config);
+        var bucketDir = Path.Combine(steam, "userdata", uid.ToString(), gameAppId.ToString());
+        if (!Directory.Exists(bucketDir))
+        {
+            Console.WriteLine($"no local bucket {bucketDir}");
+            return 1;
+        }
+
+        var registry = SctRegistry.Load();
+        var files = Directory.EnumerateFiles(bucketDir, "*", SearchOption.AllDirectories)
+            .Where(f => !Path.GetFileName(f).Equals("remotecache.vdf", StringComparison.OrdinalIgnoreCase))
+            .Select(f => new FileInfo(f))
+            .ToList();
+        if (files.Count == 0)
+        {
+            Console.WriteLine("bucket is empty (nothing to park)");
+            return 0;
+        }
+
+        await using var session = offline ? null : await ConnectSessionAsync();
+        var rpc = session is null ? null : new CloudRpcClient(session);
+
+        var engine = new ParkingEngine(config.GetOwnedSet(), registry.Slots,
+            rpc is null
+                ? null
+                : appId => Task.FromResult<RemoteBucketSnapshot?>(PoolRemoteSnapshotAsync(rpc, appId).GetAwaiter().GetResult()));
+
+        Console.WriteLine($"{gameAppId}: {files.Count} file(s) to park, owned-set size {config.GetOwnedSet().Count}");
+        var dry = !Has(args, "--force") && config.DryRun;
+        var today = DateOnly.FromDateTime(DateTime.Now);
+        var okCount = 0;
+
+        foreach (var f in files)
+        {
+            var tail = ReadTail(f.FullName, Math.Min(f.Length, Barcode.TailWindowBytes));
+            if (Barcode.TryDecodeTail(tail, out var payload, out _))
+            {
+                var (game, _, _) = Barcode.Parse(payload);
+                if (game == gameAppId)
+                {
+                    Console.WriteLine($"  skip {f.Name}: already tagged (barcode present)");
+                    continue;
+                }
+            }
+
+            var decision = engine.Pick(gameAppId, f.Name, f.Length);
+            if (!decision.Ok)
+            {
+                Console.WriteLine($"  {f.Name}: PARK REFUSED - {decision.Reason}");
+                continue;
+            }
+
+            var originalBytes = File.ReadAllBytes(f.FullName);
+            var trailer = Barcode.PackTrailer(gameAppId.ToString(), uid.ToString(), today);
+            var tagged = originalBytes.Concat(trailer).ToArray();
+            var storedName = decision.StoredName!;
+
+            if (dry)
+            {
+                Console.WriteLine($"  [dry] would park {f.Name} ({f.Length}b) -> {storedName} @ {decision.StorageAppId}");
+                continue;
+            }
+
+            if (rpc is null)
+            {
+                Console.WriteLine("  offline mode: no session - nothing uploaded (use --offline only for planning)");
+                continue;
+            }
+
+            var res = await rpc.UploadAsync(decision.StorageAppId!.Value, storedName, tagged);
+            if (res == SteamKit2.EResult.OK)
+            {
+                var barcodePayload = $"{gameAppId}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
+                registry.Upsert(GameSlot.New(gameAppId, decision.StorageAppId.Value, storedName, f.Name, tagged.Length, barcodePayload));
+                okCount++;
+            }
+            Console.WriteLine($"  {f.Name}: {res} -> {storedName} @ {decision.StorageAppId}");
+        }
+
+        if (!dry) registry.Save();
+        Console.WriteLine(dry
+            ? "dry-run complete (use --force to execute the uploads)"
+            : $"{okCount}/{files.Count} parked; registry updated");
+        return 0;
+    }
+
+    private static async Task<RemoteBucketSnapshot?> PoolRemoteSnapshotAsync(CloudRpcClient rpc, uint appId)
+    {
+        try
+        {
+            var files = await rpc.EnumerateAsync(appId);
+            Quota? quota = null;
+            try { quota = await rpc.QuotaAsync(appId); } catch { }
+            return new RemoteBucketSnapshot(appId, files, quota);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<int> UnparkCmd(string[] args, AppConfig config)
+    {
+        if (args.Length < 3 || !uint.TryParse(args[1], out var storageAppId))
+        {
+            Console.WriteLine("usage: unpark <storageAppId> <remoteName> [outdir]");
+            return 1;
+        }
+
+        var name = args[2];
+        await using var session = await ConnectSessionAsync();
+        var rpc = new CloudRpcClient(session);
+
+        var tagged = await rpc.DownloadAsync(storageAppId, name);
+        if (tagged is null)
+        {
+            Console.WriteLine("download failed");
+            return 1;
+        }
+        if (!Barcode.TryDecodeTail(ReadTailBytes(tagged), out var payload, out var trailerLen))
+        {
+            Console.WriteLine($"no barcode trailer in {name} - saving as-is");
+            trailerLen = 0;
+        }
+        else
+        {
+            var (game, _, _) = Barcode.Parse(payload);
+            Console.WriteLine($"barcode: {payload} (game {game})");
+        }
+
+        var clean = trailerLen > 0 ? Barcode.StripTrailer(tagged, trailerLen) : tagged;
+        var outDir = args.Length > 3 ? args[3] : Path.Combine("unparked", storageAppId.ToString());
+        Directory.CreateDirectory(outDir);
+        var (src, orig) = Ferry.UnparkName(name);
+        var outFile = Path.Combine(outDir, src == 0 ? name : orig);
+        await File.WriteAllBytesAsync(outFile, clean);
+        Console.WriteLine($"{clean.Length}b -> {outFile}");
+
+        var registry = SctRegistry.Load();
+        registry.Remove(name);
+        registry.Save();
+        return 0;
+    }
+
+    private static int RebuildCmd(string[] args, AppConfig config)
+    {
+        var steam = ResolveSteam(config);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var registry = PoolScanner.RebuildRegistry(steam);
+        sw.Stop();
+        registry.Save();
+        Console.WriteLine($"rebuild: {registry.Slots.Count} slot(s) in {sw.ElapsedMilliseconds}ms (registry: {SctRegistry.DefaultPath()})");
+        foreach (var s in registry.Slots.OrderBy(s => s.StorageAppId).ThenBy(s => s.StoredName))
+            Console.WriteLine($"  [{s.StorageAppId}] {s.StoredName}  game={s.GameAppId}  {s.BarcodePayload}");
+        return 0;
+    }
+
+    private static int BarcodeCmd(string[] args, AppConfig config)
+    {
+        if (args.Length < 2)
+        {
+            Console.WriteLine("usage: barcode <file> | barcode make <payload>");
+            return 1;
+        }
+
+        if (args[1] == "make")
+        {
+            var makePayload = args.Length > 2 ? string.Join(" ", args.Skip(2)) : "588650|1201110076|09082026";
+            Console.WriteLine($"payload: {makePayload}");
+            foreach (var line in Barcode.RenderBarcode(makePayload))
+                Console.WriteLine(line);
+            return 0;
+        }
+
+        var path = args[1];
+        if (!File.Exists(path))
+        {
+            Console.WriteLine($"no such file: {path}");
+            return 1;
+        }
+        var info = new FileInfo(path);
+        var tail = ReadTail(path, Math.Min(info.Length, Barcode.TailWindowBytes));
+        if (!Barcode.TryDecodeTail(tail, out var payload, out var trailerLen))
+        {
+            Console.WriteLine($"{path}: no SCT barcode trailer");
+            return 1;
+        }
+        var (game, uid, date) = Barcode.Parse(payload);
+        Console.WriteLine($"{path} ({info.Length}b):");
+        Console.WriteLine($"  trailer    : {trailerLen}b at end (magic {Barcode.Magic})");
+        Console.WriteLine($"  payload    : {payload}");
+        Console.WriteLine($"  game appid : {game}");
+        Console.WriteLine($"  user id3   : {uid}");
+        Console.WriteLine($"  tagged on  : {date:dd/MM/yyyy}");
+        Console.WriteLine("  visual:");
+        foreach (var line in Barcode.RenderBarcode(payload))
+            Console.WriteLine("    " + line);
+        return 0;
+    }
+
+    private static byte[] ReadTailBytes(byte[] data)
+        => data.Length > Barcode.TailWindowBytes ? data[^Barcode.TailWindowBytes..] : data;
+
+    private static byte[] ReadTail(string path, long count)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        fs.Seek(-count, SeekOrigin.End);
+        var buf = new byte[count];
+        fs.ReadExactly(buf);
+        return buf;
+    }
+
     private static string? Arg(string[] args, string name)
     {
         var i = Array.IndexOf(args, name);
@@ -483,7 +768,15 @@ await using var session = await ConnectSessionAsync();
             ferry (park saves into owned AppID 480 bucket):
                 ferry ls | upload <local-file> [name] | dl <name> [outfile]
 
-            auth: anonymous by default; env SCT_USER/SCT_PASS for account ops
+            parking brain:
+                pool list | refresh        curated parking-slot pool (never owned games)
+                park <uid3> <gameAppId>    park local bucket -> best slot (barcode trailer)
+                unpark <storageAppId> <name> [outdir]   download + strip barcode
+                rebuild                    tail-scan userdata -> registry.json
+                barcode <file> | barcode make <payload>   show/render barcode trailers
+            registry: {SctRegistry.DefaultPath()}
+
+            auth: anonymous by default; env SCT_USER/SCT_PASS or SCT_AUTH_MODE=qr for account ops
             """);
         return 0;
     }

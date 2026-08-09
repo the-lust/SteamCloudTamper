@@ -56,6 +56,9 @@ public sealed class SteamSession : IAsyncDisposable
 
     public event Action<string>? Event;
 
+    /// <summary>Fires with the current QR challenge URL (for in-terminal QR rendering).</summary>
+    public event Action<string>? ChallengeUrlChanged;
+
     public async Task<bool> ConnectAsync(AuthMode mode = AuthMode.Anonymous, string? username = null, string? password = null)
     {
         _cts = new CancellationTokenSource();
@@ -121,8 +124,13 @@ public sealed class SteamSession : IAsyncDisposable
                     DeviceFriendlyName = "SteamCloudTamper",
                 });
 
-                qr.ChallengeURLChanged += () => Event?.Invoke($"QR: {qr.ChallengeURL}");
+                qr.ChallengeURLChanged += () =>
+                {
+                    ChallengeUrlChanged?.Invoke(qr.ChallengeURL);
+                    Event?.Invoke($"QR: {qr.ChallengeURL}");
+                };
                 Event?.Invoke($"QR: {qr.ChallengeURL}");
+                ChallengeUrlChanged?.Invoke(qr.ChallengeURL);
 
                 var poll = await qr.PollingWaitForResultAsync(_cts.Token);
                 Event?.Invoke($"Authenticated as {poll.AccountName} - logging on...");

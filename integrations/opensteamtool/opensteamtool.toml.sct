@@ -1,0 +1,14 @@
+# SteamCloudSave <-> OpenSteamTool merge snippet (copy into D:\Steam\opensteamtool.toml)
+# SCT generates this file; it does not touch your Steam directory itself.
+
+[cloud]
+# Host CloudRedirect inside Steam; every addappid() game becomes a redirected app
+# whose cloud is served by CloudRedirect's provider (recommended: local folder).
+enabled = true
+library = "cloud_redirect.dll"
+
+[inject]
+# Load SteamCloudSave.dll into every launched game process (optional shadow lane)
+enabled = false
+# library_x64 = "D:\\tools\\SteamCloudSave\\x64\\SteamCloudSave.dll"
+# library_x86 = "D:\\tools\\SteamCloudSave\\x86\\SteamCloudSave.dll"

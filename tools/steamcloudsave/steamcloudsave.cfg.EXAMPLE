@@ -1,0 +1,13 @@
+# SteamCloudSave.dll - config (copy to steamcloudsave.cfg next to the DLL)
+
+# Where the REAL steam_api64.dll lives (for passthrough when not in shadow mode)
+steamPath=D:\Steam
+
+# Shadow lane: when set, all RemoteStorage I/O for this game goes here instead of Steam.
+shadowRoot=D:\sct_shadow
+
+# The game this DLL is mounted on
+appid=91330
+
+# Optional: path to the SCT registry.json (read-only; logged at init)
+# registryPath=C:\Users\<you>\AppData\Local\SCT\registry.json

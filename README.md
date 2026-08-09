@@ -11,18 +11,20 @@ Find every cloud bucket that references stale usernames/configs, probe what Stea
 ## Project layout
 
 - `src/SteamCloudTamper.Core` - models (Era, Bucket, Policy...), VDF parser/writer + `remotecache.vdf` generator, root-path map, Steam install/account discovery, config
+- `src/SteamCloudTamper.Core/Pool` - **the parking brain**: barcode trailer lane, curated pool DB, mapping registry (registry.json), smart allocator, tail-scan rebuild
 - `src/SteamCloudTamper.Engines` - SteamSession (anonymous / credentials+Guard / QR login), CloudRpcClient (cloud UFS via unified messages), AuditEngine (local+remote merge), WipeEngine, LocalInjectEngine with lock/relocate
 - `src/SteamCloudTamper.Cli` - CLI commands
-- `src/SteamCloudTamper.Tui` - Spectre.Console interactive manager (buckets/remote/ferry/wipe/guards/settings)
+- `src/SteamCloudTamper.Tui` - Spectre.Console interactive manager (buckets/remote/ferry/park/wipe/registry/guards/settings/QR logon) with Unicode/Nerd/ASCII icon sets + live in-terminal QR
 - `tools/SteamCloudTamper.ApiProbe` - reflection dump of SteamKit2 API surface (dev aid)
-- `tools/sct_hook` - ring-3 steam_api64 shim DLL (RemoteStorage redirect lane)
-- `tests/SteamCloudTamper.Core.Tests` - unit tests
+- `tools/steamcloudsave` - `SteamCloudSave.dll`: steam_api64 shim + RemoteStorage shadow lane (mount: shim / gbe `load_dlls` / OST `[inject]`)
+- `integrations/opensteamtool` - OST toml merge snippet, Lua pool snippet, GUI-satisfaction guide (CloudRedirect)
+- `tests/SteamCloudTamper.Core.Tests` - unit tests (barcode, pool, allocator, registry)
 
 ## Commands
 
 ```
 detect                  locate Steam + accounts + libraries
-scan                    audit local userdata buckets (per account/app)
+scan                    audit local userdata buckets (per account/app) + barcode tags
 remote-list --app <id>  list files in a cloud bucket
 probe <appid...>        check what the backend allows: enumerate / upload / delete
 wipe <appid> <file> [--blank] [--force]      delete or blank one cloud file
@@ -32,21 +34,51 @@ inject <uid3> <appid> <file> [remote-name]   local user drop + remotecache.vdf r
 lock/unlock <uid3> <appid>                    read-only file blocks Steam folder re-creation
 relocate/unrelocate <uid3> <appid>            junction-isolate bucket into SCT stash
 
+parking brain:
+    pool list | refresh        curated parking-slot pool (owned games NEVER selected)
+    park <uid3> <gameAppId> [--force] [--offline]
+                               barcode-park local bucket into best hidden slot
+    unpark <storageAppId> <name> [outdir]     download + strip barcode trailer
+    rebuild                    tail-scan userdata -> registry.json (fast: 1000 files < 1s)
+    barcode <file> | barcode make <payload>   show/render barcode trailers
+
 web lane (needs SCT_COOKIE session cookie):
     web ls | files <appid> | dl <appid> <file> [outfile]
-    -> reads https://store.steampowered.com/account/remotestorage pages (game list,
-       per-app file listings, downloads). Read-only lane for buckets UFS refuses to touch.
 
-ferry (park saves into the owned AppID 480 / Spacewar bucket):
+ferry (park saves into owned AppID 480 / Spacewar bucket):
     ferry ls | upload <local-file> [name] | dl <name> [outfile]
-    Parking names are stored as "<origAppId>_<name>". Every Steam account owns Spacewar,
-    so its UFS bucket is a writable side-parking lot when the real game bucket is
-    server-blocked.
 ```
 
 TUI (interactive manager): `dotnet run --project src/SteamCloudTamper.Tui`
+- 9 screens: Buckets / Remote / Ferry / **Park smart** / Wipe / **Registry&Pool** / Guards / Settings / **Logon (QR)**
+- QR login renders the challenge as a live in-terminal QR (Unicode half-blocks, ASCII fallback)
+- Icons: Unicode by default; `SCT_TUI_ASCII=1` ASCII; `SCT_TUI_NERD=1` Nerd-Font glyphs
 
-Auth: anonymous by default. Set `SCT_AUTH_MODE=qr` for QR login, or `SCT_USER`/`SCT_PASS` for credential login (with Guard prompts). Unowned-bucket ops need a real account session.
+## The barcode lane (what makes parking self-describing)
+
+Parked save files carry a trailer (`SCTB1` magic + CRC32 + payload):
+
+```
+<original-game-appid>|<steam-userid3>|<DDMMYYYY>      e.g. 588650|1201110076|09082026
+```
+
+- The **storage appid is never in the payload** - the bucket you are in IS the storage.
+- On a fresh install with no local info, `rebuild` tail-scans every bucket file (reads last
+  4KB only) and recreates the mapping in seconds - even for 1000+ files.
+- Unparking strips the trailer - the original save comes back byte-identical.
+- All lanes (CLI, TUI, SteamCloudSave.dll, OST/gbe register views) read the same
+  `%LOCALAPPDATA%\SCT\registry.json`.
+
+## Parking allocator rules (in order)
+
+1. Tier: hidden/dev apps > old free apps; **owned-game buckets are never selected**.
+2. Co-existence wins - a bucket already hosting other parked games is preferred
+   (multiple saves per AppID, names carry `<origAppId>_` prefixes).
+3. Name collision or quota pressure -> next deterministic candidate.
+
+Auth: anonymous by default (read-limited for unowned buckets; **uploads are denied to
+anonymous even for 480** - a `park`/`ferry upload` needs a real session:
+`SCT_USER`/`SCT_PASS` or `SCT_AUTH_MODE=qr`).
 
 Run: `dotnet run --project src/SteamCloudTamper.Cli -- <command>` (needs .NET 10 SDK).
 
@@ -75,8 +107,10 @@ Windows won't create a folder where a file with the exact same name exists. `loc
 ### Strategy 4 - junction isolation (implemented as `relocate`)
 `relocate <uid3> <appid>`: moves `userdata/<uid>/<appid>` into `%LOCALAPPDATA%\SCT\stash\<appid>` and replaces the folder with a directory junction. Steam reads/writes through the junction into the stash - the old bucket is physically gone from userdata, no admin needed. `unrelocate` re-links to the stash, or `unrelocate --restore <appid>` pulls it back.
 
-### Strategy 5 - hook lane (implemented in `tools/sct_hook`)
-The `sct_hook.c` shim DLL gets renamed to `steam_api64.dll` in a game's folder (back up the real one). It loads the real Steam API from the Steam root via `sct_hook.cfg`:
+### Strategy 5 - hook lane (implemented as `SteamCloudSave.dll` in `tools/steamcloudsave`)
+One DLL, three mounting styles (identical engine): renamed to `steam_api64.dll` (shim),
+dropped into `<game>\steam_settings\load_dlls\` (gbe_fork auto-load), or loaded via
+OpenSteamTool's `[inject]`. Config `steamcloudsave.cfg`:
 
 ```
 steamPath=D:\Steam
@@ -84,7 +118,11 @@ shadowRoot=D:\sct_shadow
 app=91330
 ```
 
-When `app` matches, all ISteamRemoteStorage calls for that game read/write only under `D:\sct_shadow\<appid>\` (shadow), so the game never touches Steam's buckets or userdata for it. Every other call forwards to the real steam_api64. Build with `tools\sct_hook\build.ps1`. This is the ownership-context sandbox lane - the game thinks everything is fine locally.
+When `app` matches, all ISteamRemoteStorage calls for that game read/write only under
+`D:\sct_shadow\<appid>\` (shadow), so the game never touches Steam's buckets or userdata
+for it. Every other call forwards to the real steam_api64. The GUI-"satisfaction" path
+for unlocked games (client-side cloud icon + sync) is OpenSteamTool's `[cloud]` slot
+hosting CloudRedirect over a local provider folder - see `integrations/opensteamtool/`.
 
 ### Strategy 3 - "console tricks"
 `steam://open/console` commands like `download_depot <AppID>` or any `settingcloudaudit` do NOT exist / do not do what the casual writeups claim (`download_depot` fetches game files, unrelated to cloud saves). The only real per-bucket client switches are: Steam settings > Cloud per-app toggles (owned apps), the lockfile above, and CloudRedirect hiding.
@@ -95,4 +133,4 @@ When `app` matches, all ISteamRemoteStorage calls for that game read/write only 
 - **Valve patch (Apr 2025)**: cloud UFS for non-owned AppIDs now returns `AccessDenied` on enumerate/upload/delete. Existing tests confirmed: even enumeration is denied.
 - **Retail SteamCloudFileManager**: deletes via web/ISteamRemoteStorage are physically rejected server side for special internal appids (e.g. 760/7); they resort to CDP-hijacked read-only web sessions for those. This is why the web lane here is read-only by design.
 - **Old "conflict dialog" trick** (zero-out files, delete remotecache.vdf, resume the conflict dialog with "upload nothing"): predates the 2025 patch; only really viable for owned games.
-- Active lanes for stuck unowned buckets: web lane (read/backup), ferry park (own 480 bucket), local lockout/relocate, hook shim, and Steam Support request. The app-emulator (gbe_fork) build is a planned later lane.
+- Active lanes for stuck unowned buckets: web lane (read/backup), ferry park (480 or any hidden slot), barcode park (pool allocator), local lockout/relocate, hook shim, CloudRedirect via OST `[cloud]`, and Steam Support request. The app-emulator (gbe_fork) build ships with a `load_dlls` mount for SteamCloudSave.dll.

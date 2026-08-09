@@ -1,16 +1,20 @@
-// sct_hook.cpp - steam_api64 shim with ISteamRemoteStorage redirection.
+// SteamCloudSave.c - steam_api64 shim + RemoteStorage shadow lane for SCT.
 //
-// EXPERIMENTAL "hook lane": place this DLL in a game's folder AS steam_api64.dll
-// (after backing up the real one). Config file sct_hook.cfg (or SCT_HOOK_CONFIG):
+// One DLL, three mounting styles (identical engine):
+//   1) SHIM : rename this DLL to steam_api64.dll in a game folder (back up the real one).
+//   2) GBE  : drop into <game>/steam_settings/load_dlls/SteamCloudSave.dll
+//             (gbe_fork loads every DLL there via LoadLibraryW automatically).
+//   3) OST  : load via OpenSteamTool's [inject] (library_x64/library_x86) into the game process.
 //
-//   steamPath=D:\Steam
-//   shadowRoot=D:\sct_shadow
-//   appid=91330
+// Config file steamcloudsave.cfg (or env SCT_SCS_CONFIG):
+//   steamPath=D:\Steam        - where the REAL steam_api64.dll lives (passthrough)
+//   shadowRoot=D:\sct_shadow  - shadow lane: all RemoteStorage I/O goes here
+//   appid=91330               - the game being redirected
+//   registryPath=<path>       - optional SCT registry.json (read-only info, logged)
 //
-// When appid + shadowRoot are set, all ISteamRemoteStorage calls for that game
-// read/write only the local shadow folder "<shadowRoot>\remote\<file>" and never
-// touch Steam's cloud or userdata. Otherwise everything forwards to the real
-// steam_api64.dll resolved next to steamPath.
+// When appid + shadowRoot are set, ISteamRemoteStorage calls for that game read/write
+// only "<shadowRoot>\<appid>\<file>" and never touch Steam's cloud or userdata.
+// Otherwise everything forwards to the real steam_api64.dll next to steamPath.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -23,15 +27,16 @@
 extern "C" {
 #endif
 
-static char   g_steamPath[MAX_PATH] = {0};
-static char   g_shadowRoot[MAX_PATH] = {0};
-static uint32_t g_targetAppId = 0;
-static HMODULE g_real = NULL;
-static int    g_inited = 0;
+static char        g_steamPath[MAX_PATH] = {0};
+static char        g_shadowRoot[MAX_PATH] = {0};
+static char        g_registryPath[MAX_PATH] = {0};
+static uint32_t    g_targetAppId = 0;
+static HMODULE     g_real = NULL;
+static int         g_inited = 0;
 
 static void sctLog(const char* fmt, ...)
 {
-    FILE* f = fopen("sct_hook.log", "a");
+    FILE* f = fopen("steamcloudsave.log", "a");
     if (!f) return;
     va_list ap; va_start(ap, fmt);
     vfprintf(f, fmt, ap); va_end(ap);
@@ -39,12 +44,8 @@ static void sctLog(const char* fmt, ...)
     fclose(f);
 }
 
-static void loadConfig(void)
+static void loadConfigFrom(const char* cfgPath)
 {
-    if (g_inited) return;
-    g_inited = 1;
-    const char* cfgPath = getenv("SCT_HOOK_CONFIG");
-    if (!cfgPath) cfgPath = "sct_hook.cfg";
     FILE* f = fopen(cfgPath, "r");
     if (!f) { sctLog("sct: no config %s", cfgPath); return; }
 
@@ -53,12 +54,25 @@ static void loadConfig(void)
     {
         char key[256], val[768];
         if (sscanf(line, " %255[^=]=%767[^\r\n]", key, val) != 2) continue;
-        if (!_stricmp(key, "steamPath"))  strncpy(g_steamPath, val, sizeof(g_steamPath) - 1);
+        if (!_stricmp(key, "steamPath"))      strncpy(g_steamPath, val, sizeof(g_steamPath) - 1);
         else if (!_stricmp(key, "shadowRoot")) strncpy(g_shadowRoot, val, sizeof(g_shadowRoot) - 1);
-        else if (!_stricmp(key, "appid"))  g_targetAppId = (uint32_t)strtoul(val, NULL, 10);
+        else if (!_stricmp(key, "appid"))      g_targetAppId = (uint32_t)strtoul(val, NULL, 10);
+        else if (!_stricmp(key, "registryPath")) strncpy(g_registryPath, val, sizeof(g_registryPath) - 1);
     }
     fclose(f);
-    sctLog("sct: steam=%s appid=%u shadow=%s", g_steamPath, g_targetAppId, g_shadowRoot);
+    sctLog("sct: config %s steam=%s appid=%u shadow=%s registry=%s",
+           cfgPath, g_steamPath, g_targetAppId, g_shadowRoot, g_registryPath);
+}
+
+static void loadConfig(void)
+{
+    if (g_inited) return;
+    g_inited = 1;
+    const char* cfgPath = getenv("SCT_SCS_CONFIG");
+    if (cfgPath && cfgPath[0]) { loadConfigFrom(cfgPath); return; }
+    const char* cfgEnv = getenv("SCT_HOOK_CONFIG");
+    if (cfgEnv && cfgEnv[0]) { loadConfigFrom(cfgEnv); return; }
+    loadConfigFrom("steamcloudsave.cfg");
 }
 
 static void mkdirs(const char* path)
@@ -77,10 +91,6 @@ static void shadowPathFor(const char* file, char* out, size_t outLen)
 {
     snprintf(out, outLen, "%s\\%u\\%s", g_shadowRoot, g_targetAppId, file);
 }
-
-// Shadow files each live in a per-appid container; appid container doubles as
-// the "app" so a single config can carry many games later. (multiple-appid
-// support: see sct_hook.h roadmap note)
 
 static HMODULE realModule(void)
 {
@@ -102,7 +112,7 @@ static FARPROC realFn(const char* name)
 static int ShadowMode(void) { return g_targetAppId != 0 && g_shadowRoot[0] != 0; }
 
 // ---------------------------------------------------------------------------
-// ISteamRemoteStorage bridges  (the exports a game's IAT references)
+// ISteamRemoteStorage bridges (the exports a game's IAT references)
 // ---------------------------------------------------------------------------
 static int32_t WINAPI Hook_FileWrite(void* c, const char* file, const void* data, int32_t cb)
 {
@@ -122,8 +132,6 @@ static int32_t WINAPI Hook_FileWrite(void* c, const char* file, const void* data
     return f ? f(c, file, data, cb) : 0;
 }
 
-static int32_t (*Hook_FileRead)(void*, const char*, void*, int32_t)
-    = (int32_t(*)(void*, const char*, void*, int32_t))0;
 static int32_t WINAPI SctFileRead(void* c, const char* file, void* data, int32_t toRead)
 {
     if (ShadowMode())
@@ -249,12 +257,8 @@ SHADOW_EXPORT(int64_t, SteamRemoteStorage_FileSize, (void* c, const char* f), Sc
 SHADOW_EXPORT(bool, SteamRemoteStorage_FilePersisted, (void* c, const char* f), SctFilePersisted(c, f))
 SHADOW_EXPORT(int64_t, SteamRemoteStorage_FileGetTimestamp, (void* c, const char* f), SctFileTimestamp(c, f))
 
-// The real steam_api64 export table uses "SteamAPI_ISteamRemoteStorage_*"
-// names; add aliases so games that link by the official name reach us first.
-#define ALIAS(bridgeName, implFn) \
-    __declspec(dllexport, alias(#implFn)) void* bridgeName;
-
-// alias via .def is cleaner; define explicit forwards instead:
+// The real steam_api64 export table uses "SteamAPI_ISteamRemoteStorage_*" names;
+// expose the official names too so games linking by them reach us first.
 __declspec(dllexport) int32_t WINAPI SteamAPI_ISteamRemoteStorage_FileWrite(void* c, const char* f, const void* d, int32_t n)
 { return Hook_FileWrite(c, f, d, n); }
 __declspec(dllexport) int32_t WINAPI SteamAPI_ISteamRemoteStorage_FileRead(void* c, const char* f, void* d, int32_t n)
@@ -314,14 +318,41 @@ __declspec(dllexport) uint64_t WINAPI SteamAPI_GetHSteamPipe(void)
     return fn ? fn() : 0;
 }
 
-// Status/naming helpers
-__declspec(dllexport) const char* WINAPI SctHookState(void)
+// ---------------------------------------------------------------------------
+// Public SteamCloudSave API (the "one brain" entry points for other tools)
+// ---------------------------------------------------------------------------
+__declspec(dllexport) int WINAPI SteamCloudSave_Init(const char* configPath)
+{
+    loadConfig();
+    if (configPath && configPath[0]) loadConfigFrom(configPath);
+    if (g_registryPath[0])
+    {
+        DWORD attrs = GetFileAttributesA(g_registryPath);
+        sctLog("sct: registry %s %s", g_registryPath,
+               attrs != INVALID_FILE_ATTRIBUTES ? "present" : "missing");
+    }
+    return 1;
+}
+
+__declspec(dllexport) void WINAPI SteamCloudSave_Shutdown(void)
+{
+    if (g_real) { FreeLibrary(g_real); g_real = NULL; }
+    sctLog("sct: shutdown");
+}
+
+__declspec(dllexport) const char* WINAPI SteamCloudSave_State(void)
 {
     return ShadowMode() ? "redirecting" : "off";
 }
-__declspec(dllexport) uint32_t WINAPI SctHookApp(void)
+
+__declspec(dllexport) uint32_t WINAPI SteamCloudSave_App(void)
 {
     return g_targetAppId;
+}
+
+__declspec(dllexport) const char* WINAPI SteamCloudSave_ShadowRoot(void)
+{
+    return g_shadowRoot;
 }
 
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID)

@@ -5,7 +5,7 @@ obj/
 .idea/
 steamcloudtamper.json
 *.tmp
-tools/sct_hook/*.dll
-tools/sct_hook/*.a
-tools/sct_hook/*.o
-tools/sct_hook/sct_hook.log
+tools/steamcloudsave/*.dll
+tools/steamcloudsave/*.log
+tools/steamcloudsave/*.o
+tools/steamcloudsave/*.a
