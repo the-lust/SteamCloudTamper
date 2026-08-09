@@ -8,12 +8,14 @@ Reasons to exist: Valve added (approx. April 2025) a server-side restriction tha
 
 Find every cloud bucket that references stale usernames/configs, probe what Steam still allows (enumerate / upload / delete), then either delete the bucket or blank its contents so the client stops syncing old data.
 
-## Project layout (M1 - SteamKit2 CLI)
+## Project layout
 
 - `src/SteamCloudTamper.Core` - models (Era, Bucket, Policy...), VDF parser/writer + `remotecache.vdf` generator, root-path map, Steam install/account discovery, config
-- `src/SteamCloudTamper.Engines` - SteamSession (anonymous or SCT_USER/SCT_PASS), CloudRpcClient (cloud RPC via unified messages), AuditEngine (local+remote merge), WipeEngine, LocalInjectEngine
+- `src/SteamCloudTamper.Engines` - SteamSession (anonymous / credentials+Guard / QR login), CloudRpcClient (cloud UFS via unified messages), AuditEngine (local+remote merge), WipeEngine, LocalInjectEngine with lock/relocate
 - `src/SteamCloudTamper.Cli` - CLI commands
-- `tools/SteamCloudTamper.ApiProbe` - reflection dump of SteamKit2 API surface (development aid)
+- `src/SteamCloudTamper.Tui` - Spectre.Console interactive manager (buckets/remote/ferry/wipe/guards/settings)
+- `tools/SteamCloudTamper.ApiProbe` - reflection dump of SteamKit2 API surface (dev aid)
+- `tools/sct_hook` - ring-3 steam_api64 shim DLL (RemoteStorage redirect lane)
 - `tests/SteamCloudTamper.Core.Tests` - unit tests
 
 ## Commands
@@ -27,7 +29,8 @@ wipe <appid> <file> [--blank] [--force]      delete or blank one cloud file
 wipe-all <appid> [--blank] [--force]         wipe an entire bucket
 guards add|rm|ls <appid>   maintained never-touch list (steamcloudtamper.json)
 inject <uid3> <appid> <file> [remote-name]   local user drop + remotecache.vdf regen
-lock/unlock <uid3> <appid>  isolate a bucket locally (see Strategy 2 below)
+lock/unlock <uid3> <appid>                    read-only file blocks Steam folder re-creation
+relocate/unrelocate <uid3> <appid>            junction-isolate bucket into SCT stash
 
 web lane (needs SCT_COOKIE session cookie):
     web ls | files <appid> | dl <appid> <file> [outfile]
@@ -36,12 +39,14 @@ web lane (needs SCT_COOKIE session cookie):
 
 ferry (park saves into the owned AppID 480 / Spacewar bucket):
     ferry ls | upload <local-file> [name] | dl <name> [outfile]
-    Parking names are stored as "<origAppId>_<name>". Since every Steam account owns
-    Spacewar, its UFS bucket is a safe parallel parking lot when the original game's
-    bucket is server-blocked.
+    Parking names are stored as "<origAppId>_<name>". Every Steam account owns Spacewar,
+    so its UFS bucket is a writable side-parking lot when the real game bucket is
+    server-blocked.
 ```
 
-Auth: anonymous by default; set `SCT_USER` / `SCT_PASS` for account-scoped operations (probe/wipe of unowned buckets requires this because anonymous enumeration is denied).
+TUI (interactive manager): `dotnet run --project src/SteamCloudTamper.Tui`
+
+Auth: anonymous by default. Set `SCT_AUTH_MODE=qr` for QR login, or `SCT_USER`/`SCT_PASS` for credential login (with Guard prompts). Unowned-bucket ops need a real account session.
 
 Run: `dotnet run --project src/SteamCloudTamper.Cli -- <command>` (needs .NET 10 SDK).
 
@@ -67,6 +72,20 @@ Windows won't create a folder where a file with the exact same name exists. `loc
 
 `unlock <uid3> <appid>` removes the blocker. Guarded appids are skipped automatically.
 
+### Strategy 4 - junction isolation (implemented as `relocate`)
+`relocate <uid3> <appid>`: moves `userdata/<uid>/<appid>` into `%LOCALAPPDATA%\SCT\stash\<appid>` and replaces the folder with a directory junction. Steam reads/writes through the junction into the stash - the old bucket is physically gone from userdata, no admin needed. `unrelocate` re-links to the stash, or `unrelocate --restore <appid>` pulls it back.
+
+### Strategy 5 - hook lane (implemented in `tools/sct_hook`)
+The `sct_hook.c` shim DLL gets renamed to `steam_api64.dll` in a game's folder (back up the real one). It loads the real Steam API from the Steam root via `sct_hook.cfg`:
+
+```
+steamPath=D:\Steam
+shadowRoot=D:\sct_shadow
+app=91330
+```
+
+When `app` matches, all ISteamRemoteStorage calls for that game read/write only under `D:\sct_shadow\<appid>\` (shadow), so the game never touches Steam's buckets or userdata for it. Every other call forwards to the real steam_api64. Build with `tools\sct_hook\build.ps1`. This is the ownership-context sandbox lane - the game thinks everything is fine locally.
+
 ### Strategy 3 - "console tricks"
 `steam://open/console` commands like `download_depot <AppID>` or any `settingcloudaudit` do NOT exist / do not do what the casual writeups claim (`download_depot` fetches game files, unrelated to cloud saves). The only real per-bucket client switches are: Steam settings > Cloud per-app toggles (owned apps), the lockfile above, and CloudRedirect hiding.
 
@@ -75,5 +94,5 @@ Windows won't create a folder where a file with the exact same name exists. `loc
 - **760 pollution confirmed by multiple RE projects**: SteamTools rewrote cloud requests for non-owned games to AppID 760 (Screenshots) without per-game prefixes - so saves collide across games and get mirrored into each injected app's userdata. STFixer/CloudRedirect and this repo all started from the same mess.
 - **Valve patch (Apr 2025)**: cloud UFS for non-owned AppIDs now returns `AccessDenied` on enumerate/upload/delete. Existing tests confirmed: even enumeration is denied.
 - **Retail SteamCloudFileManager**: deletes via web/ISteamRemoteStorage are physically rejected server side for special internal appids (e.g. 760/7); they resort to CDP-hijacked read-only web sessions for those. This is why the web lane here is read-only by design.
-- **Old "conflict dialog" trick** (zero-out files, delete remotecache.vdf, resume the conflict dialog with "upload nothing"): predates the 2025 patch; only really viable for owned games and fake-succeeds on unowned ones.
-- The web lane + ferry park + local lockout + Steam Support request are the four lanes for stuck unowned buckets right now; client-hook (CloudRedirect-style DLL) and app emulator (gbe_fork) builds are planned later lanes to fake the ownership context end-to-end.
+- **Old "conflict dialog" trick** (zero-out files, delete remotecache.vdf, resume the conflict dialog with "upload nothing"): predates the 2025 patch; only really viable for owned games.
+- Active lanes for stuck unowned buckets: web lane (read/backup), ferry park (own 480 bucket), local lockout/relocate, hook shim, and Steam Support request. The app-emulator (gbe_fork) build is a planned later lane.

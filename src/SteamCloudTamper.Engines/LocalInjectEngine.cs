@@ -101,6 +101,67 @@ public sealed class LocalInjectEngine
         return true;
     }
 
+    /// <summary>
+    /// Junction-based isolation: moves the bucket dir to a private stash and puts
+    /// a directory junction named {appId} in its place. Steam reads/writes through
+    /// the junction and lands in the stash - nothing ever reaches the real
+    /// userdata folder. No admin required for junctions.
+    /// Returns the stash path.
+    /// </summary>
+    public string? Relocate(string userDataDir, uint appId, string? stashRoot = null)
+    {
+        var appDir = Path.Combine(userDataDir, appId.ToString());
+        stashRoot ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SCT", "stash");
+        Directory.CreateDirectory(stashRoot);
+        var stash = Path.Combine(stashRoot, appId.ToString());
+
+        if (Directory.Exists(appDir))
+        {
+            Directory.Move(appDir, stash);
+            Log?.Invoke($"Moved bucket {appId} -> {stash}");
+        }
+        else if (Directory.Exists(stash))
+        {
+            Log?.Invoke($"Bucket {appId} already relocated");
+        }
+
+        if (Directory.Exists(appDir) || new FileInfo(appDir).Exists) return null;
+
+        // Create junction: cmd mklink /J (allowed without admin for dirs)
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c mklink /J \"{appDir}\" \"{stash}\"",
+            CreateNoWindow = true,
+            UseShellExecute = false,
+        };
+        using var p = System.Diagnostics.Process.Start(psi);
+        p?.WaitForExit();
+        var ok = p is not null && p.ExitCode == 0 && Directory.Exists(appDir);
+        if (!ok) Log?.Invoke("junction creation failed (run terminal as admin or enable Developer Mode)");
+        else Log?.Invoke($"Junction {appId} -> {stash}");
+        return ok ? stash : null;
+    }
+
+    public bool Unrelocate(string userDataDir, uint appId)
+    {
+        var appDir = Path.Combine(userDataDir, appId.ToString());
+        var stash = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SCT", "stash", appId.ToString());
+
+        if (!Directory.Exists(appDir)) return false;
+        var info = new FileInfo(appDir);
+        if ((info.Attributes & FileAttributes.ReparsePoint) == 0)
+        {
+            Log?.Invoke($"{appId} is not a junction");
+            return true;
+        }
+
+        Directory.Delete(appDir); // deletes junction link only
+        if (Directory.Exists(stash)) Directory.Move(stash, appDir);
+        Log?.Invoke($"Removed junction, restored {appId}");
+        return true;
+    }
+
     private static void ClearBucketDir(string dir)
     {
         foreach (var d in Directory.EnumerateDirectories(dir)) Directory.Delete(d, true);

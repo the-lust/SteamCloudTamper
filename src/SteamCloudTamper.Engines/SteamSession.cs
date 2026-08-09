@@ -1,8 +1,35 @@
 using SteamKit2;
+using SteamKit2.Authentication;
+using SteamKit2.Internal;
 
 namespace SteamCloudTamper.Engines;
 
-public enum AuthMode { Anonymous, Credentials }
+public enum AuthMode { Anonymous, Credentials, Qr }
+
+public sealed class ConsoleAuthenticator(Action<string>? log) : IAuthenticator
+{
+    public async Task<string> GetDeviceCodeAsync(bool sendCodeWasIncorrect)
+    {
+        log?.Invoke(sendCodeWasIncorrect
+            ? "Steam Guard device code was incorrect, try again:"
+            : "Enter the Steam Guard device code from your phone:");
+        return (await Console.In.ReadLineAsync())?.Trim() ?? "";
+    }
+
+    public async Task<string> GetEmailCodeAsync(string email, bool codeWasIncorrect)
+    {
+        log?.Invoke(codeWasIncorrect
+            ? $"The Steam Guard code for {email} was incorrect, try again:"
+            : $"Enter the Steam Guard code sent to {email}:");
+        return (await Console.In.ReadLineAsync())?.Trim() ?? "";
+    }
+
+    public Task<bool> AcceptDeviceConfirmationAsync()
+    {
+        log?.Invoke("A device confirmation was requested - approve it in the Steam mobile app");
+        return Task.FromResult(true);
+    }
+}
 
 public sealed class SteamSession : IAsyncDisposable
 {
@@ -51,19 +78,61 @@ public sealed class SteamSession : IAsyncDisposable
 
         var user = _client.GetHandler<SteamUser>();
         _callbacks.Subscribe<SteamUser.LoggedOnCallback>(OnLoggedOn);
-        if (mode == AuthMode.Anonymous)
+
+        switch (mode)
         {
-            Event?.Invoke("Logging on anonymously...");
-            user.LogOnAnonymous();
-        }
-        else
-        {
-            Event?.Invoke("Logging on with credentials...");
-            user.LogOn(new SteamUser.LogOnDetails
+            case AuthMode.Anonymous:
             {
-                Username = username,
-                Password = password,
-            });
+                Event?.Invoke("Logging on anonymously...");
+                user.LogOnAnonymous();
+                break;
+            }
+
+            case AuthMode.Credentials:
+            {
+                Event?.Invoke("Starting credential auth...");
+                var auth = _client.Authentication;
+                var session = await auth.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
+                {
+                    Username = username,
+                    Password = password,
+                    PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_SteamClient,
+                    DeviceFriendlyName = "SteamCloudTamper",
+                    Authenticator = new ConsoleAuthenticator(Event),
+                });
+
+                var poll = await session.PollingWaitForResultAsync(_cts.Token);
+                Event?.Invoke($"Authenticated as {poll.AccountName} - logging on...");
+                user.LogOn(new SteamUser.LogOnDetails
+                {
+                    Username = poll.AccountName,
+                    AccessToken = poll.AccessToken,
+                });
+                break;
+            }
+
+            case AuthMode.Qr:
+            {
+                Event?.Invoke("Starting QR auth - scan in the Steam mobile app...");
+                var auth = _client.Authentication;
+                var qr = await auth.BeginAuthSessionViaQRAsync(new AuthSessionDetails
+                {
+                    PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_SteamClient,
+                    DeviceFriendlyName = "SteamCloudTamper",
+                });
+
+                qr.ChallengeURLChanged += () => Event?.Invoke($"QR: {qr.ChallengeURL}");
+                Event?.Invoke($"QR: {qr.ChallengeURL}");
+
+                var poll = await qr.PollingWaitForResultAsync(_cts.Token);
+                Event?.Invoke($"Authenticated as {poll.AccountName} - logging on...");
+                user.LogOn(new SteamUser.LogOnDetails
+                {
+                    Username = poll.AccountName,
+                    AccessToken = poll.AccessToken,
+                });
+                break;
+            }
         }
 
         await _logon.Task.WaitAsync(TimeSpan.FromSeconds(60));

@@ -26,6 +26,7 @@ public static class Program
                 "guards" => Guards(args, config),
                 "inject" => InjectLocal(args, config),
                 "lock" => LockBucket(args, config),
+                "relocate" => RelocateBucket(args, config),
                 "web" => await WebCloud(args, config),
                 "ferry" => await FerryCmd(args, config),
                 _ => Help()
@@ -390,21 +391,65 @@ await using var session = await ConnectSessionAsync();
         }
     }
 
+    private static int RelocateBucket(string[] args, AppConfig config)
+    {
+        if (args.Length < 4 || !uint.TryParse(args[2], out var uid) || !uint.TryParse(args[3], out var appId))
+        {
+            Console.WriteLine("usage: relocate <uid3> <appid>   | unrelocate <uid3> <appid>");
+            return 1;
+        }
+
+        var undo = args[1] == "unrelocate";
+        if (!undo && config.GuardedAppIds.Contains(appId))
+        {
+            Console.WriteLine($"appid {appId} is guarded, skipping");
+            return 1;
+        }
+
+        var steam = ResolveSteam(config);
+        var userDir = Path.Combine(steam, "userdata", uid.ToString());
+        var engine = new LocalInjectEngine();
+        engine.Log += Console.WriteLine;
+
+        if (!undo)
+        {
+            var dryRun = !Has(args, "--force") && config.DryRun;
+            if (dryRun)
+            {
+                Console.WriteLine($"DRY-RUN: would relocate appid {appId} from {userDir}");
+                return 0;
+            }
+            engine.Relocate(userDir, appId);
+        }
+        else
+        {
+            engine.Unrelocate(userDir, appId);
+        }
+
+        return 0;
+    }
+
     private static async Task<SteamSession> ConnectSessionAsync()
     {
         var session = new SteamSession();
         session.Event += Console.WriteLine;
 
+        var mode = (Environment.GetEnvironmentVariable("SCT_AUTH_MODE") ?? "").ToLowerInvariant();
         var user = Environment.GetEnvironmentVariable("SCT_USER");
         var pass = Environment.GetEnvironmentVariable("SCT_PASS");
-        var ok = user is { Length: > 0 } && pass is { Length: > 0 }
-            ? await session.ConnectAsync(AuthMode.Credentials, user, pass)
-            : await session.ConnectAsync(AuthMode.Anonymous);
+
+        var ok = mode switch
+        {
+            "qr" => await session.ConnectAsync(AuthMode.Qr),
+            _ when user is { Length: > 0 } && pass is { Length: > 0 }
+                => await session.ConnectAsync(AuthMode.Credentials, user, pass),
+            _ => await session.ConnectAsync(AuthMode.Anonymous),
+        };
 
         if (!ok)
         {
             await session.DisposeAsync();
-            throw new InvalidOperationException("could not log on to Steam (anonymous or SCT_USER/SCT_PASS logon failed)");
+            throw new InvalidOperationException("could not log on to Steam (set SCT_USER/SCT_PASS or SCT_AUTH_MODE=qr)");
         }
 
         return session;
@@ -432,6 +477,7 @@ await using var session = await ConnectSessionAsync();
             guards add|rm|ls <appid>   maintain never-touch list (persisted)
             inject <uid3> <appid> <file> [remote-name]    userdata drop + remotecache.vdf regen
             lock/unlock <uid3> <appid>   isolate a bucket locally: read-only file blocks Steam re-creation
+            relocate/unrelocate <uid3> <appid>  junction-isolate bucket into %LOCALAPPDATA%\SCT\stash
 
             web lane (needs SCT_COOKIE):  web ls | files <appid> | dl <appid> <file>
             ferry (park saves into owned AppID 480 bucket):
