@@ -26,6 +26,8 @@ public static class Program
                 "guards" => Guards(args, config),
                 "inject" => InjectLocal(args, config),
                 "lock" => LockBucket(args, config),
+                "web" => await WebCloud(args, config),
+                "ferry" => await FerryCmd(args, config),
                 _ => Help()
             };
         }
@@ -264,6 +266,130 @@ await using var session = await ConnectSessionAsync();
         return 0;
     }
 
+    private static async Task<int> WebCloud(string[] args, AppConfig config)
+    {
+        var cookie = config.CookieFile is not null && File.Exists(config.CookieFile)
+            ? File.ReadAllText(config.CookieFile).Trim()
+            : Environment.GetEnvironmentVariable("SCT_COOKIE");
+
+        if (string.IsNullOrEmpty(cookie))
+        {
+            Console.WriteLine("Set SCT_COOKIE or config.CookieFile (a steam session cookie) for web lane.");
+            return 1;
+        }
+
+        var web = new SteamWebClient(cookie);
+        var cmd = args.Length > 1 ? args[1].ToLowerInvariant() : "ls";
+
+        switch (cmd)
+        {
+            case "ls":
+            {
+                var apps = await web.ListAppsAsync();
+                Console.WriteLine($"{apps.Count} app(s) visible on remote storage:");
+                foreach (var a in apps.OrderBy(a => a.AppId))
+                    Console.WriteLine($"  [{a.AppId}] {a.Name}  ({a.FileCount} files, {a.TotalBytes}b)");
+                return 0;
+            }
+            case "files":
+            {
+                if (args.Length < 3 || !uint.TryParse(args[2], out var appId))
+                {
+                    Console.WriteLine("usage: web files <appid>");
+                    return 1;
+                }
+                var files = await web.ListFilesAsync(appId);
+                Console.WriteLine($"{appId}: {files.Count} file(s):");
+                foreach (var f in files)
+                    Console.WriteLine($"  {f.FileName}  {f.Size}b  {f.Detail ?? ""}");
+                return 0;
+            }
+            case "dl":
+            {
+                if (args.Length < 4 || !uint.TryParse(args[2], out var appId))
+                {
+                    Console.WriteLine("usage: web dl <appid> <name> [outfile]");
+                    return 1;
+                }
+                var outFile = args.Length > 4 ? args[4] : $"{appId}_{args[3]}";
+                var bytes = await web.DownloadAsync(appId, args[3]);
+                if (bytes is null)
+                {
+                    Console.WriteLine("download failed (no data)");
+                    return 1;
+                }
+                File.WriteAllBytes(outFile, bytes);
+                Console.WriteLine($"saved {bytes.Length}b -> {outFile}");
+                return 0;
+            }
+            default:
+                Console.WriteLine("usage: web ls | files <appid> | dl <appid> <file> [outfile]");
+                return 1;
+        }
+    }
+
+    private static async Task<int> FerryCmd(string[] args, AppConfig config)
+    {
+        var sub = args.Length > 1 ? args[1].ToLowerInvariant() : "ls";
+        if (sub is not ("ls" or "upload" or "dl"))
+        {
+            Console.WriteLine("usage: ferry ls | upload <local-file> [name] | dl <name> [outfile]");
+            return 1;
+        }
+
+        await using var session = await ConnectSessionAsync();
+        var rpc = new CloudRpcClient(session);
+
+        switch (sub)
+        {
+            case "ls":
+            {
+                var files = await rpc.EnumerateAsync(Ferry.SpacewarApp);
+                Console.WriteLine($"AppID 480 (Spacewar) bucket - {files.Count} file(s):");
+                foreach (var f in files)
+                {
+                    var (src, orig) = Ferry.UnparkName(f.FileName);
+                    var origin = src != 0 && orig != f.FileName ? $" (from AppID {src}: {orig})" : "";
+                    Console.WriteLine($"  {f.FileName}  {f.FileSize}b  ts={f.Timestamp}{origin}");
+                }
+                return 0;
+            }
+            case "upload":
+            {
+                if (args.Length < 3)
+                {
+                    Console.WriteLine("usage: ferry upload <local-file> [name]");
+                    return 1;
+                }
+                var src = args[2];
+                var data = File.ReadAllBytes(src);
+                var name = args.Length > 3 ? args[3] : Ferry.ParkName(0, Path.GetFileName(src).Replace("_", "-"));
+                var result = await rpc.UploadAsync(Ferry.SpacewarApp, name, data);
+                Console.WriteLine($"upload('{name}') -> {result} ({data.Length}b)");
+                return result == SteamKit2.EResult.OK ? 0 : 1;
+            }
+            default:
+            {
+                if (args.Length < 3)
+                {
+                    Console.WriteLine("usage: ferry dl <name> [outfile]");
+                    return 1;
+                }
+                var name = args[2];
+                var data = await rpc.DownloadAsync(Ferry.SpacewarApp, name);
+                if (data is null)
+                {
+                    Console.WriteLine("download failed");
+                    return 1;
+                }
+                var outFile = args.Length > 3 ? args[3] : name.Replace('/', '_');
+                File.WriteAllBytes(outFile, data);
+                Console.WriteLine($"saved {data.Length}b -> {outFile}");
+                return 0;
+            }
+        }
+    }
+
     private static async Task<SteamSession> ConnectSessionAsync()
     {
         var session = new SteamSession();
@@ -306,6 +432,10 @@ await using var session = await ConnectSessionAsync();
             guards add|rm|ls <appid>   maintain never-touch list (persisted)
             inject <uid3> <appid> <file> [remote-name]    userdata drop + remotecache.vdf regen
             lock/unlock <uid3> <appid>   isolate a bucket locally: read-only file blocks Steam re-creation
+
+            web lane (needs SCT_COOKIE):  web ls | files <appid> | dl <appid> <file>
+            ferry (park saves into owned AppID 480 bucket):
+                ferry ls | upload <local-file> [name] | dl <name> [outfile]
 
             auth: anonymous by default; env SCT_USER/SCT_PASS for account ops
             """);
