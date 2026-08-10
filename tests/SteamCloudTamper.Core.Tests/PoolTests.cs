@@ -1,5 +1,6 @@
 using SteamCloudTamper.Core;
 using SteamCloudTamper.Core.Pool;
+using SteamCloudTamper.Core.Steam;
 
 namespace SteamCloudTamper.Core.Tests;
 
@@ -68,8 +69,8 @@ public class PoolDbTests
     [Fact]
     public void BlockedAppsAreNeverUsable()
     {
-        Assert.False(PoolDb.Find(7)!.IsUsable);
-        Assert.False(PoolDb.Find(760)!.IsUsable);
+        Assert.False(PoolDb.Find(760)!.IsUsable); // SteamTools flood site stays dead
+        Assert.True(PoolDb.Find(7)!.IsUsable);    // Steam client bucket re-candidate (native syncs observed)
         Assert.True(PoolDb.Find(480)!.IsUsable);
     }
 
@@ -176,7 +177,120 @@ public class ParkingEngineTests
         var d = engine.Pick(91330, "save.sav", 1024);
         Assert.True(d.Ok);
         Assert.NotEqual(480u, d.StorageAppId);
-        Assert.Equal(113200u, d.StorageAppId); // next best usable slot
+        Assert.Equal(7u, d.StorageAppId); // next best usable slot (Steam Client bucket re-candidate)
+    }
+
+    [Fact]
+    public void ForceBucketPinsEveryFileToOneSlot()
+    {
+        var engine = new ParkingEngine([], []);
+        var plan = engine.Plan(91330,
+            [new ParkFile("a.sav", 100), new ParkFile("b.sav", 100)],
+            spread: 3, forceBucket: 250820);
+        Assert.All(plan, d => Assert.True(d.Ok));
+        Assert.All(plan, d => Assert.Equal(250820u, d.StorageAppId));
+    }
+
+    [Fact]
+    public void ForceBucketRefusedWhenBlockedInPool()
+    {
+        var engine = new ParkingEngine([], []);
+        var plan = engine.Plan(91330, [new ParkFile("a.sav", 100)], forceBucket: 760);
+        Assert.All(plan, d => Assert.False(d.Ok));
+        Assert.Contains("blocked", plan[0].Reason);
+    }
+
+    [Fact]
+    public void ForceBucketRefusedWhenServerDenied()
+    {
+        var engine = new ParkingEngine([], [], poolProbes: new Dictionary<uint, string> { [480] = "Denied" });
+        var plan = engine.Plan(91330, [new ParkFile("a.sav", 100)], forceBucket: 480);
+        Assert.All(plan, d => Assert.False(d.Ok));
+        Assert.Contains("Denied", plan[0].Reason);
+    }
+
+    [Fact]
+    public void ForceBucketRefusedWhenNotInPool()
+    {
+        var engine = new ParkingEngine([], []);
+        var plan = engine.Plan(91330, [new ParkFile("a.sav", 100)], forceBucket: 91330);
+        Assert.All(plan, d => Assert.False(d.Ok));
+    }
+
+    [Fact]
+    public void PostureSurvivesRegistryRoundtrip()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"sct_reg_{Guid.NewGuid():N}.json");
+        try
+        {
+            var reg = new SctRegistry();
+            reg.Upsert(GameSlot.New(588650, 480, "588650_user_0.dat", "user_0.dat", 10, "588650|1|01012026")
+                .WithPosture("real"));
+            reg.Save(path);
+            var loaded = SctRegistry.Load(path);
+            Assert.Equal("real", loaded.Slots[0].Posture);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+}
+
+public class SteamLocatorTests
+{
+    [Fact]
+    public void IsOstRedirectedDetectsLuaAddappid()
+    {
+        var steam = Path.Combine(Path.GetTempPath(), $"sct_steam_{Guid.NewGuid():N}");
+        var luaDir = Path.Combine(steam, "config", "lua");
+        Directory.CreateDirectory(luaDir);
+        File.WriteAllText(Path.Combine(luaDir, "588650.lua"),
+            "local a = addappid(480)\nlocal b = addappid(113200)\n");
+        try
+        {
+            Assert.True(SteamLocator.IsOstRedirected(steam, 480));
+            Assert.True(SteamLocator.IsOstRedirected(steam, 113200));
+            Assert.False(SteamLocator.IsOstRedirected(steam, 7));
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SyncPostureIsRealWithoutOst()
+    {
+        var steam = Path.Combine(Path.GetTempPath(), $"sct_steam_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(steam);
+        try
+        {
+            Assert.Equal("real", SteamLocator.SyncPosture(steam, 588650));
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void IsCloudRedirectLoadedNeedsToml()
+    {
+        var steam = Path.Combine(Path.GetTempPath(), $"sct_steam_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(steam);
+        try
+        {
+            Assert.False(SteamLocator.IsCloudRedirectLoaded(steam));
+            File.WriteAllText(Path.Combine(steam, "opensteamtool.toml"), "[cloud]\nenabled = true\nlibrary = \"cloud_redirect.dll\"\n");
+            Assert.False(SteamLocator.IsCloudRedirectLoaded(steam)); // dll missing in root
+            File.WriteAllText(Path.Combine(steam, "cloud_redirect.dll"), "");
+            Assert.True(SteamLocator.IsCloudRedirectLoaded(steam));
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
     }
 }
 

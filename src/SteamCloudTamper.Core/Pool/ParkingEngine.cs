@@ -65,7 +65,8 @@ public sealed class ParkingEngine
         IReadOnlyList<ParkFile> files,
         bool stealth = false,
         int spread = 1,
-        int copies = 1)
+        int copies = 1,
+        uint? forceBucket = null)
     {
         if (_owned.Contains(gameAppId))
             throw new InvalidOperationException($"appid {gameAppId} is in the owned list - parking an owned game is refused (use Ferry for backups).");
@@ -79,6 +80,23 @@ public sealed class ParkingEngine
             .Select(p => (App: p, Score: PoolScoring.TierScore(p.Tier) + PoolScoring.AgeScore(p.ReleaseYear)))
             .OrderByDescending(c => c.Score).ThenBy(c => c.App.AppId)
             .ToList();
+
+        // explicit bucket override (--bucket): must exist in the pool and not be server-denied
+        if (forceBucket is { } forced)
+        {
+            var forcedApp = PoolDb.Find(forced);
+            if (forcedApp is null)
+                return files.Select(f => (ParkingDecision)ParkingDecision.Fail(
+                    $"bucket {forced} is not in the parking pool")).ToList();
+            if (forcedApp.IsBlocked)
+                return files.Select(f => (ParkingDecision)ParkingDecision.Fail(
+                    $"bucket {forced} is blocked in the pool ({forcedApp.Note})")).ToList();
+            if (IsServerDenied(forced))
+                return files.Select(f => (ParkingDecision)ParkingDecision.Fail(
+                    $"bucket {forced} had a server Denied verdict - choose another (pool probe)")).ToList();
+            candidates = candidates.Where(c => c.App.AppId == forced).ToList();
+            spread = 1;
+        }
 
         var head = Math.Min(spread, candidates.Count);
         if (head == 0)

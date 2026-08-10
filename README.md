@@ -40,12 +40,21 @@ parking brain (anti-ban: private cloud saves of real apps only, never public flo
     pool probe [--uid <id3>] [--force] [--wait-sec N]
                                   one-private-file writability probe through the RUNNING
                                   Steam client (no logon); verdicts saved to the registry
-    park <gameAppId> [--uid <id3>] [--force] [--client|--rpc] [--spread N] [--copies N] [--stealth] [--wait-sec N]
-                                  default lane = CLIENT: stage files into real-app buckets
-                                  locally, the signed-in Steam session syncs them - no SCT
-                                  login needed. --rpc forces the logon-based upload lane.
-                                  --spread N distributes files across N slots,
-                                  --copies N mirrors to N slots, --stealth hashes names
+    park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>]
+         [--spread N] [--copies N] [--stealth] [--wait-sec N]
+                                  auto   = Steam up + account active -> client; else rpc
+                                  client = stage locally; the signed-in Steam session uploads
+                                           (real UFS or CR provider, per app posture)
+                                  rpc    = SCT logs on (SCT_USER/SCT_PASS or QR) and uploads
+                                           directly - the ONLY real upload for buckets the
+                                           client does not AutoCloud (e.g. 480)
+                                  stage  = drop files locally only; session syncs on its own
+                                  --bucket <appid> pins every file to one explicit slot
+    client status | sync <appid> [--down] | tell <command>
+                                  client lane: status / force-sync one bucket / raw console
+                                  (console input skipped on client builds where it is blocked)
+    provider status | init [sync-dir] | ls [--uid <id3>] [--app <appid>]
+                                  CloudRedirect folder-provider management (SCT owns the config)
     unpark <storageAppId> <name> [outdir]     download + strip barcode trailer
     rebuild                    tail-scan userdata -> registry.json (fast: 1000 files < 1s)
     barcode <file> | barcode make <payload>   show/render barcode trailers
@@ -98,10 +107,21 @@ AutoLogin → most recent). When Steam is running with that account:
   buckets locally, the real Steam client owns the upload, and `CloudLogWatcher` reads
   the verdict from `logs/cloud_log.txt` (`Upload complete, result OK` / `Access Denied`).
   The TUI header shows the live session (e.g. `session: ✔ 1201110076 (Steam running)`).
-- Verdict caveat: Steam only AutoClouds buckets it manages (installed games, launched
-  test apps). For parking slots like 480/113200 the client syncs when the app runs -
-  until then the verdict stays "Unknown" and the staged copies are verified locally
-  by `rebuild`'s barcode tail-scan instead.
+- **AutoCloud reality check (verified 2026-08-10 on this client)**: Steam only evaluates
+  buckets it manages itself - on this machine that is AppID 7 (Steam client config,
+  real UFS, synced to ChangeNumber 65), 588650 (now CloudRedirect-local), and the
+  installed games. **Spacewar 480 and the cloud test app 113200 are NEVER AutoClouded**,
+  so a staged 480 file gets no client tick and the verdict stays "Unknown" - the parked
+  copies are verified locally by `rebuild`'s barcode tail-scan, and for a REAL server
+  upload of 480/113200 the lane must be `--lane rpc` (SCT logs on as the account).
+- **Posture tracking**: every confirmed registry slot records where its upload landed -
+  `real` (Valve UFS), `provider` (CloudRedirect folder), `redirected` (OST lua hook) or
+  `local` (staged only). `SteamLocator.SyncPosture()` re-derives it live; the TUI
+  registry screen shows the column.
+- **Steam Console caveat**: `steam://open/console` is blocked on newer client builds
+  (verified: no console window even with `-console`; the page does not open). SCT skips
+  it and waits on the AutoCloud tick; `client tell` still sends raw commands on builds
+  where the console exists. The console-free real-upload path is the RPC lane.
 
 ## Steam GUI shows "synced" (OST + CloudRedirect, live-verified 2026-08-10)
 
@@ -170,7 +190,7 @@ for unlocked games (client-side cloud icon + sync) is OpenSteamTool's `[cloud]` 
 hosting CloudRedirect over a local provider folder - see `integrations/opensteamtool/`.
 
 ### Strategy 3 - "console tricks"
-`steam://open/console` commands like `download_depot <AppID>` or any `settingcloudaudit` do NOT exist / do not do what the casual writeups claim (`download_depot` fetches game files, unrelated to cloud saves). The only real per-bucket client switches are: Steam settings > Cloud per-app toggles (owned apps), the lockfile above, and CloudRedirect hiding.
+`steam://open/console` commands like `download_depot <AppID>` or any `settingcloudaudit` do NOT exist / do not do what the casual writeups claim (`download_depot` fetches game files, unrelated to cloud saves). Verified on this client (2026-08-10): `steam://open/console` does not even open the console anymore - the only real per-bucket client switches are: Steam settings > Cloud per-app toggles (owned apps), the lockfile above, and CloudRedirect hiding. SCT's `client sync` therefore relies on the AutoCloud tick, and the deterministic real upload is the RPC lane.
 
 ## Research notes (why these lanes exist)
 

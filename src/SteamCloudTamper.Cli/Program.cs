@@ -37,6 +37,8 @@ public static class Program
                 "pool" => await PoolCmd(args, config),
                 "park" => await ParkCmd(args, config),
                 "unpark" => await UnparkCmd(args, config),
+                "client" => await ClientCmd(args, config),
+                "provider" => ProviderCmd(args, config),
                 "rebuild" => RebuildCmd(args, config),
                 "barcode" => BarcodeCmd(args, config),
                 _ => Help()
@@ -580,11 +582,12 @@ await using var session = await ConnectSessionAsync();
             }
             engine.RegenerateVdf(userAppDir);
 
-            var verdict = await new CloudLogWatcher(steam, slot.AppId)
-                .WaitForVerdictAsync(TimeSpan.FromSeconds(waitSec));
+            // force the running client to sync the probe NOW via the console lane
+            // (cloud_sync_up); falls back to the client's own AutoCloud tick
+            var (verdict, _, consoleAvailable) = await PushSyncViaConsoleAsync(steam, slot.AppId, waitSec);
             total++;
 
-            switch (verdict.Verdict)
+            switch (verdict)
             {
                 case CloudVerdict.Success:
                     registry.PoolProbes[slot.AppId] = "VerifiedWritable";
@@ -599,7 +602,8 @@ await using var session = await ConnectSessionAsync();
                     engine.RegenerateVdf(userAppDir);
                     break;
                 default:
-                    Console.WriteLine($"  {slot.AppId} ({slot.Name}): {verdict.Verdict} - no verdict yet (client quiet / not syncing this app)");
+                    Console.WriteLine($"  {slot.AppId} ({slot.Name}): {verdict} - no verdict yet");
+                    PrintNoVerdictGuidance(steam, slot.AppId, consoleAvailable);
                     break;
             }
             registry.Save();
@@ -610,6 +614,239 @@ await using var session = await ConnectSessionAsync();
     }
 
     private const string ProbeFileName = "sctprobe.bin";
+
+    /// <summary>
+    /// Forces a cloud sync of one bucket through the RUNNING Steam client's console
+    /// (cloud_sync_up/down) and reads the verdict from cloud_log.txt. This is the
+    /// real-cloud pressure button: staged files get uploaded by the official client,
+    /// exactly like the GUI's "synced to cloud" indicator - no SCT logon needed.
+    /// </summary>
+    private static async Task<int> ClientCmd(string[] args, AppConfig config)
+    {
+        var steam = ResolveSteam(config);
+        var sub = args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+
+        switch (sub)
+        {
+            case "status":
+            {
+                var running = SteamLocator.IsRunning();
+                Console.WriteLine($"steam running : {running}");
+                if (running)
+                {
+                    var active = SteamLocator.GetActiveAccount(steam);
+                    Console.WriteLine($"active account: {active?.AccountId} ({active?.DisplayName ?? "?"})");
+                    Console.WriteLine($"console open  : {SteamConsole.IsOpen()}");
+                    var toml = Path.Combine(steam, "opensteamtool.toml");
+                    Console.WriteLine($"OST toml      : {(File.Exists(toml) ? "present" : "absent")}");
+                    Console.WriteLine($"CR provider   : {SteamLocator.IsCloudRedirectLoaded(steam)}");
+                }
+                else
+                {
+                    Console.WriteLine("(client lane needs Steam up - see 'rpc' or 'park --lane stage' otherwise)");
+                }
+                return 0;
+            }
+            case "sync":
+            {
+                if (args.Length < 3 || !uint.TryParse(args[2], out var appId))
+                {
+                    Console.WriteLine("usage: client sync <appid> [--down] [--wait-sec N]");
+                    return 1;
+                }
+                var down = Has(args, "--down");
+                var waitSec = Arg(args, "--wait-sec") is { } ws && int.TryParse(ws, out var w) ? w : 25;
+                var (verdict, line, consoleAvailable) = await PushSyncViaConsoleAsync(steam, appId, waitSec, down);
+
+                var posture = SteamLocator.SyncPosture(steam, appId);
+                Console.WriteLine($"{appId}: {verdict} (posture: {posture})");
+                if (line is not null) Console.WriteLine($"  <{line.Trim()}>");
+
+                var registry = SctRegistry.Load();
+                registry.PoolProbes[appId] = verdict switch
+                {
+                    CloudVerdict.Success => "VerifiedWritable",
+                    CloudVerdict.Denied => "Denied",
+                    _ => registry.PoolProbes.TryGetValue(appId, out var old) ? old : "Unknown",
+                };
+                registry.Save();
+                switch (verdict)
+                {
+                    case CloudVerdict.Success:
+                        Console.WriteLine("slot marked VerifiedWritable in the registry");
+                        break;
+                    case CloudVerdict.Denied:
+                        Console.WriteLine("slot marked Denied - parking engine will skip it");
+                        break;
+                    default:
+                        Console.WriteLine("no verdict yet - client quiet or app not syncing");
+                        PrintNoVerdictGuidance(steam, appId, consoleAvailable);
+                        break;
+                }
+                return verdict == CloudVerdict.Success ? 0 : 1;
+            }
+            case "tell":
+            {
+                if (args.Length < 3)
+                {
+                    Console.WriteLine("usage: client tell <raw-console-command>   e.g. client tell cloud_sync_up 480");
+                    return 1;
+                }
+                if (!SteamLocator.IsRunning())
+                {
+                    Console.WriteLine("Steam is not running");
+                    return 1;
+                }
+                if (!await SteamConsole.OpenConsoleAsync(TimeSpan.FromSeconds(15)))
+                {
+                    Console.WriteLine("could not open the Steam console (steam://open/console)");
+                    return 1;
+                }
+                var raw = string.Join(" ", args.Skip(2));
+                var sent = SteamConsole.SendCommand(raw);
+                Console.WriteLine(sent ? $"sent to console: {raw}" : "console window not found");
+                return sent ? 0 : 1;
+            }
+            default:
+                Console.WriteLine("usage: client status | sync <appid> [--down] [--wait-sec N] | tell <command>");
+                return 1;
+        }
+    }
+
+    /// <summary>
+    /// Client-lane sync pressure: stage + wait for the RUNNING client's own cloud
+    /// behavior. The Steam Console (steam://open/console) is not reliably openable
+    /// on newer client builds (blocked on this machine), so the lane is tick-based:
+    /// AutoCloud'd apps push on their own, everything else gets honest guidance to
+    /// use the RPC lane. 'client tell' still exposes manual console input for
+    /// builds where it works.
+    /// </summary>
+    private static async Task<(CloudVerdict Verdict, string? MatchLine, bool ConsoleAvailable)> PushSyncViaConsoleAsync(
+        string steam, uint appId, int waitSec, bool down = false)
+    {
+        if (!SteamLocator.IsRunning())
+            throw new InvalidOperationException("Steam is not running - the client lane needs the running session");
+
+        Console.WriteLine("  [console] skipping Steam Console (not reliable on this client build) - waiting for the client's own sync tick");
+        var result = await new CloudLogWatcher(steam, appId).WaitForVerdictAsync(TimeSpan.FromSeconds(waitSec));
+        return (result.Verdict, result.MatchLine, false);
+    }
+
+    /// <summary>Explains what to do when the client lane produced no verdict.</summary>
+    private static void PrintNoVerdictGuidance(string steam, uint appId, bool consoleAvailable)
+    {
+        if (consoleAvailable)
+        {
+            Console.WriteLine($"  no verdict yet for {appId} - try 'client sync {appId} --wait-sec 60' or launch the app once");
+            return;
+        }
+        if (!CloudLogWatcher.WasEverAutoClouded(steam, appId))
+        {
+            Console.WriteLine($"  {appId} is not AutoClouded by this client (never seen 'AutoCloud checking local state' in cloud_log).");
+            Console.WriteLine("  The client will not sync it on its own tick - use the RPC lane for a REAL upload:");
+            Console.WriteLine("    park <gameAppId> --lane rpc --bucket <appid>   (needs SCT_USER/SCT_PASS or SCT_AUTH_MODE=qr)");
+            Console.WriteLine("  or drop a file into userdata and upload it as the account via 'ferry upload'");
+        }
+        else
+        {
+            Console.WriteLine($"  {appId} IS AutoClouded - the client syncs it on its own; wait a bit and re-check with 'client sync {appId}'");
+        }
+    }
+
+    /// <summary>
+    /// CloudRedirect provider family: SCT owns the provider config
+    /// (%AppData%\CloudRedirect\config.json + folder provider root) that OST/CR
+    /// consume. Uploads for CR-intercepted apps land here (posture "provider").
+    /// </summary>
+    private static int ProviderCmd(string[] args, AppConfig config)
+    {
+        var sub = args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+        var configPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "CloudRedirect", "config.json");
+
+        switch (sub)
+        {
+            case "status":
+            {
+                var exists = File.Exists(configPath);
+                Console.WriteLine($"CR config      : {configPath} ({(exists ? "present" : "absent")})");
+                if (exists)
+                {
+                    try
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(configPath));
+                        var root = doc.RootElement;
+                        Console.WriteLine($"provider       : {root.GetProperty("provider").GetString()}");
+                        Console.WriteLine($"sync path      : {root.GetProperty("sync_path").GetString()}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"config unreadable: {ex.Message}");
+                    }
+                }
+                var steam = ResolveSteam(config);
+                Console.WriteLine($"CR loaded      : {SteamLocator.IsCloudRedirectLoaded(steam)}");
+                return 0;
+            }
+            case "init":
+            {
+                var syncPath = args.Length > 2 ? args[2] : @"D:\sct_provider";
+                Directory.CreateDirectory(syncPath);
+                Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+                var json = $$"""
+                {
+                  "provider": "folder",
+                  "sync_path": {{System.Text.Json.JsonSerializer.Serialize(syncPath)}}
+                }
+                """;
+                File.WriteAllText(configPath, json);
+                Console.WriteLine($"wrote {configPath} (provider=folder, sync_path={syncPath})");
+                Console.WriteLine("restart Steam for CR to pick it up if it was already running");
+                return 0;
+            }
+            case "ls":
+            {
+                var syncPath = Arg(args, "--path");
+                if (syncPath is null && File.Exists(configPath))
+                {
+                    try
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(configPath));
+                        syncPath = doc.RootElement.GetProperty("sync_path").GetString();
+                    }
+                    catch { }
+                }
+                if (syncPath is null || !Directory.Exists(syncPath))
+                {
+                    Console.WriteLine("no provider root found (provider init first, or pass --path <dir>)");
+                    return 1;
+                }
+                var filter = Arg(args, "--app") is { } fa && uint.TryParse(fa, out var fapp) ? fapp : (uint?)null;
+                var filterUid = Arg(args, "--uid") is { } fu && uint.TryParse(fu, out var fuid) ? fuid : (uint?)null;
+                var any = false;
+                foreach (var accDir in Directory.EnumerateDirectories(syncPath))
+                {
+                    var acc = Path.GetFileName(accDir);
+                    if (filterUid is not null && !acc.Equals(filterUid.ToString(), StringComparison.Ordinal)) continue;
+                    foreach (var appDir in Directory.EnumerateDirectories(accDir))
+                    {
+                        var app = Path.GetFileName(appDir);
+                        if (filter is not null && !app.Equals(filter.Value.ToString(), StringComparison.Ordinal)) continue;
+                        var blobs = Path.Combine(appDir, "blobs");
+                        var files = Directory.Exists(blobs) ? Directory.GetFiles(blobs).Select(Path.GetFileName).ToList() : new List<string>();
+                        Console.WriteLine($"  {acc}/{app}: {files.Count} blob(s) [{string.Join(", ", files)}]");
+                        any = true;
+                    }
+                }
+                if (!any) Console.WriteLine("(empty provider)");
+                return 0;
+            }
+            default:
+                Console.WriteLine("usage: provider status | init [sync-dir] | ls [--uid <id3>] [--app <appid>] [--path <dir>]");
+                return 1;
+        }
+    }
 
     private static async Task<int> ParkCmd(string[] args, AppConfig config)
     {
@@ -632,11 +869,10 @@ await using var session = await ConnectSessionAsync();
         }
         else
         {
-            Console.WriteLine("usage: park <gameAppId> [--uid <id3>] [--force] [--offline] [--client|--rpc] [--spread N] [--copies N] [--stealth] [--wait-sec N]");
+            Console.WriteLine("usage: park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>] [--spread N] [--copies N] [--stealth] [--wait-sec N]");
             return 1;
         }
 
-        var offline = Has(args, "--offline");
         var stealth = Has(args, "--stealth");
         var spread = Arg(args, "--spread") is { } sp && int.TryParse(sp, out var s) ? Math.Max(1, s) : 1;
         var copies = Arg(args, "--copies") is { } cp && int.TryParse(cp, out var c) ? Math.Max(1, c) : 1;
@@ -664,20 +900,55 @@ await using var session = await ConnectSessionAsync();
         var engine = new ParkingEngine(config.GetOwnedSet(), registry.Slots, poolProbes: registry.PoolProbes);
         Console.WriteLine($"{gameAppId}: {files.Count} file(s) to park | spread={spread} copies={copies} stealth={stealth} | owned-set {config.GetOwnedSet().Count} | uid {uid}");
 
-        // lane choice: --rpc forces the logon-based upload lane; otherwise, if Steam is
-        // running with this account signed in, use the CLIENT lane = stage locally, let the
-        // running session sync, read the verdict. No SCT login at all.
-        var clientLane = Has(args, "--client")
-            || (!Has(args, "--rpc") && SteamLocator.IsRunning() && SteamLocator.GetActiveAccount(steam)?.AccountId == uid);
-        if (clientLane && !SteamLocator.IsRunning())
+        // ---- lane matrix ----
+        //   auto   : Steam up + this account active -> client; otherwise explain the options
+        //   client : stage locally + force cloud_sync_up through the RUNNING session's console
+        //   rpc    : SCT logs on (QR/creds/anonymous) and uploads directly
+        //   stage  : drop files locally only, no upload - the session syncs on its own later
+        var lane = (Arg(args, "--lane") ?? "").ToLowerInvariant() switch
         {
-            Console.WriteLine("--client requested but Steam is not running");
-            return 1;
+            "client" => "client",
+            "rpc" => "rpc",
+            "stage" => "stage",
+            _ => Has(args, "--client") ? "client"
+                : Has(args, "--rpc") ? "rpc"
+                : Has(args, "--offline") || Has(args, "--stage") ? "stage"
+                : "auto",
+        };
+        if (lane == "auto")
+        {
+            if (SteamLocator.IsRunning())
+            {
+                var active = SteamLocator.GetActiveAccount(steam)?.AccountId;
+                lane = active == uid ? "client" : "rpc";
+                if (lane == "rpc")
+                    Console.WriteLine($"active account {active} != target {uid}: falling back to the RPC lane (--lane client only works for the signed-in account)");
+            }
+            else
+            {
+                lane = "rpc";
+                Console.WriteLine("Steam is not running: using the RPC lane (needs SCT login; 'park --lane stage' drops files locally only)");
+            }
+        }
+        if (lane == "client")
+        {
+            if (!SteamLocator.IsRunning())
+            {
+                Console.WriteLine("--lane client needs Steam running; use --lane rpc or --lane stage");
+                return 1;
+            }
+            var active = SteamLocator.GetActiveAccount(steam)?.AccountId;
+            if (active != uid)
+            {
+                Console.WriteLine($"--lane client needs the target account signed in (active {active}, target {uid}); use --lane rpc or --lane stage");
+                return 1;
+            }
         }
 
+        uint? bucket = Arg(args, "--bucket") is { } bk && uint.TryParse(bk, out var b) ? b : null;
         var today = DateOnly.FromDateTime(DateTime.Now);
         var decisions = engine.Plan(gameAppId, files.Select(f => new ParkFile(f.Name, f.Length)).ToList(),
-            stealth, spread, copies);
+            stealth, spread, copies, forceBucket: bucket);
 
         var plans = new List<(string FileName, ParkingDecision D, byte[] Tagged)>();
         var di = 0;
@@ -722,24 +993,50 @@ await using var session = await ConnectSessionAsync();
             return 0;
         }
 
-        if (clientLane)
+        if (lane == "client")
         {
-            return await ClientLaneParkAsync(steam, uid, registry, engine, plans, today,
+            return await ClientLaneParkAsync(steam, uid, registry, plans, today,
                 Arg(args, "--wait-sec") is { } ws && int.TryParse(ws, out var w) ? w : 25);
         }
 
+        if (lane == "stage")
+        {
+            // ---- stage lane: local drop only, no upload, no login ----
+            // the running Steam client (any account) will sync the bucket on its own tick;
+            // posture is "local" until a client sync confirms the upload.
+            var injector = new LocalInjectEngine();
+            var userDataRoot = Path.Combine(steam, "userdata", uid.ToString());
+            foreach (var group in plans.GroupBy(p => p.D.StorageAppId!.Value))
+            {
+                var slot = group.Key;
+                var slotDir = Path.Combine(userDataRoot, slot.ToString(), "remote");
+                Directory.CreateDirectory(slotDir);
+                foreach (var p in group)
+                    await File.WriteAllBytesAsync(Path.Combine(slotDir, p.D.StoredName!), p.Tagged);
+                injector.RegenerateVdf(Path.Combine(userDataRoot, slot.ToString()));
+                Console.WriteLine($"  [{slot}] staged {group.Count()} file(s) locally (no upload; client syncs on its own)");
+            }
+            var stageBarcode = $"{gameAppId}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
+            foreach (var p in plans)
+                registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, p.D.StoredName!, p.FileName, p.Tagged.Length, stageBarcode)
+                    .WithPosture("local"));
+            registry.Save();
+            Console.WriteLine("stage lane done - verify later with 'client sync <appid>' once that account signs in");
+            return 0;
+        }
+
         // ---- RPC lane: logon-based upload (QR / credentials / anonymous) ----
-        await using var session = offline ? null : await ConnectSessionAsync();
-        if (session is null && !offline) return 1;
-        var rpc = session is null ? null : new CloudRpcClient(session);
+        await using var session = await ConnectSessionAsync();
+        var rpc = new CloudRpcClient(session);
         var okCount = 0;
         foreach (var p in plans)
         {
-            var res = await rpc!.UploadAsync(p.D.StorageAppId!.Value, p.D.StoredName!, p.Tagged);
+            var res = await rpc.UploadAsync(p.D.StorageAppId!.Value, p.D.StoredName!, p.Tagged);
             if (res == SteamKit2.EResult.OK)
             {
                 var payloadBarcode = $"{gameAppId}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
-                registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, p.D.StoredName!, p.FileName, p.Tagged.Length, payloadBarcode));
+                registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, p.D.StoredName!, p.FileName, p.Tagged.Length, payloadBarcode)
+                    .WithPosture("real"));
                 okCount++;
             }
             Console.WriteLine($"  {p.FileName}: {res} -> {p.D.StoredName} @ {p.D.StorageAppId}");
@@ -750,13 +1047,15 @@ await using var session = await ConnectSessionAsync();
     }
 
     /// <summary>
-    /// CLIENT lane: drop tagged files into the slot buckets locally, let the already
-    /// signed-in Steam client synchronize them, read the verdict from cloud_log.txt.
-    /// Denied slots are excluded from the pool immediately; proven slots get rewritten
-    /// as VerifiedWritable. No SCT credentials are ever needed.
+    /// CLIENT lane: drop tagged files into the slot buckets locally, force
+    /// cloud_sync_up through the RUNNING Steam Console (the official client does the
+    /// upload - real UFS or CloudRedirect local, whichever posture the app has),
+    /// read the verdict from cloud_log.txt. Denied slots are excluded from the pool
+    /// immediately; every confirmed slot records where its upload actually landed.
+    /// No SCT credentials are ever needed.
     /// </summary>
     private static async Task<int> ClientLaneParkAsync(string steam, uint uid, SctRegistry registry,
-        ParkingEngine engine, List<(string FileName, ParkingDecision D, byte[] Tagged)> plans,
+        List<(string FileName, ParkingDecision D, byte[] Tagged)> plans,
         DateOnly today, int waitSec)
     {
         var injector = new LocalInjectEngine();
@@ -773,22 +1072,27 @@ await using var session = await ConnectSessionAsync();
                 await File.WriteAllBytesAsync(Path.Combine(slotDir, p.D.StoredName!), p.Tagged);
             injector.RegenerateVdf(Path.Combine(userDataRoot, slot.ToString()));
 
-            Console.WriteLine($"  [{slot}] staged {slotPlans.Count} file(s); waiting up to {waitSec}s for the client sync...");
-            var verdict = await new CloudLogWatcher(steam, slot).WaitForVerdictAsync(TimeSpan.FromSeconds(waitSec));
-            Console.WriteLine($"  [{slot}] {verdict.Verdict}" + (verdict.MatchLine is null ? "" : $"  <{verdict.MatchLine.Trim()}>"));
+            Console.WriteLine($"  [{slot}] staged {slotPlans.Count} file(s); forcing client sync via console...");
+            var (verdict, line, consoleAvailable) = await PushSyncViaConsoleAsync(steam, slot, waitSec);
+            Console.WriteLine($"  [{slot}] {verdict}" + (line is null ? "" : $"  <{line.Trim()}>"));
 
-            switch (verdict.Verdict)
+            switch (verdict)
             {
                 case CloudVerdict.Success:
+                {
                     registry.PoolProbes[slot] = "VerifiedWritable";
+                    var posture = SteamLocator.SyncPosture(steam, slot);
                     foreach (var p in slotPlans)
                     {
                         var game = ReadGameFromTrailer(p.Tagged);
                         if (game is null) continue;
                         var payload = $"{game}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
-                        registry.Upsert(GameSlot.New(game.Value, slot, p.D.StoredName!, p.FileName, p.Tagged.Length, payload));
+                        registry.Upsert(GameSlot.New(game.Value, slot, p.D.StoredName!, p.FileName, p.Tagged.Length, payload)
+                            .WithPosture(posture));
                     }
+                    Console.WriteLine($"  [{slot}] upload confirmed - lands in {(posture == "real" ? "Valve UFS (real cloud)" : posture == "provider" ? "CloudRedirect folder provider" : "OST redirected bucket")}");
                     break;
+                }
                 case CloudVerdict.Denied:
                     registry.PoolProbes[slot] = "Denied";
                     foreach (var p in slotPlans)
@@ -801,7 +1105,8 @@ await using var session = await ConnectSessionAsync();
                     error++;
                     break;
                 default:
-                    Console.WriteLine($"  [{slot}] no verdict yet - files stay staged locally; the client syncs on its next cloud tick (re-check with 'pool probe' later)");
+                    Console.WriteLine($"  [{slot}] no verdict yet - files stay staged locally; re-push with 'client sync {slot}' later");
+                    PrintNoVerdictGuidance(steam, slot, consoleAvailable);
                     break;
             }
 
@@ -989,11 +1294,20 @@ await using var session = await ConnectSessionAsync();
 
             parking brain (anti-ban: private cloud saves of real apps only, never public flooding):
                 pool list | refresh | probe [--uid <id3>] [--force] [--wait-sec N]
-                                      probe = one-private-file writability check via the RUNNING
-                                      Steam client (no logon); verdicts saved to the registry
-                park <gameAppId> [--uid <id3>] [--force] [--client|--rpc] [--spread N] [--copies N] [--stealth] [--wait-sec N]
-                                      default lane = client: stage locally, the signed-in Steam
-                                      client syncs, verdict read from cloud_log.txt (no SCT login)
+                                      probe = one-private-file writability check via console lane
+                                      (forced cloud_sync_up through the RUNNING Steam client);
+                                      verdicts saved to the registry
+                park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>]
+                     [--spread N] [--copies N] [--stealth] [--wait-sec N]
+                                      auto   = Steam up + account active -> client; else rpc
+                                      client = stage locally + console cloud_sync_up (official client uploads;
+                                               real UFS or CR provider per app posture; no SCT login)
+                                      rpc    = SCT logs on (QR/creds) and uploads directly
+                                      stage  = drop files locally only; session syncs on its own later
+                client status | sync <appid> [--down] | tell <command>
+                                      console lane: force real sync of one bucket via the running client
+                provider status | init [sync-dir] | ls [--uid <id3>] [--app <appid>]
+                                      CloudRedirect folder provider management (SCT owns the config)
                 unpark <storageAppId> <name> [outdir]   download + strip barcode
                 rebuild                    tail-scan userdata -> registry.json
                 barcode <file> | barcode make <payload>   show/render barcode trailers

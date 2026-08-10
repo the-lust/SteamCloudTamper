@@ -166,4 +166,75 @@ public static class SteamLocator
 
         return results;
     }
+
+    /// <summary>
+    /// True when OpenSteamTool has hooked this AppID via a config/lua/*.lua
+    /// "addappid" bundle (OST/SteamTools-style). Those buckets never touch Valve -
+    /// they are CloudRedirect-local or plain registry entries.
+    /// </summary>
+    public static bool IsOstRedirected(string steamPath, uint appId)
+    {
+        var luaDir = Path.Combine(steamPath, "config", "lua");
+        if (!Directory.Exists(luaDir)) return false;
+        try
+        {
+            foreach (var lua in Directory.EnumerateFiles(luaDir, "*.lua"))
+            {
+                foreach (var line in File.ReadAllLines(lua))
+                {
+                    var t = line.Trim();
+                    if (!t.Contains("addappid", StringComparison.OrdinalIgnoreCase)) continue;
+                    // addappid(<appid>) or addappid <appid>
+                    var m = System.Text.RegularExpressions.Regex.Match(
+                        t, @"addappid\s*[\(\s]\s*([0-9]{3,})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (m.Success && uint.TryParse(m.Groups[1].Value, out var hooked) && hooked == appId)
+                        return true;
+                }
+            }
+        }
+        catch
+        {
+            return false;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True when CloudRedirect is active in this Steam install (opensteamtool.toml
+    /// [cloud] enabled and the DLL sits in the Steam root). Uploads for hooked apps
+    /// then land in the CR provider (folder) instead of Valve.
+    /// </summary>
+    public static bool IsCloudRedirectLoaded(string steamPath)
+    {
+        var toml = Path.Combine(steamPath, "opensteamtool.toml");
+        if (!File.Exists(toml)) return false;
+        try
+        {
+            var txt = File.ReadAllText(toml);
+            if (!txt.Contains("[cloud]", StringComparison.OrdinalIgnoreCase)) return false;
+            if (txt.Contains("enabled = true", StringComparison.OrdinalIgnoreCase))
+            {
+                var dll = Path.Combine(steamPath, "cloud_redirect.dll");
+                return File.Exists(dll) || Directory.Exists(Path.Combine(steamPath, "opensteamtool"));
+            }
+        }
+        catch
+        {
+            return false;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Where an upload for this AppID actually lands right now:
+    ///  "redirected" - OST lua addappid hook (never touches Valve)
+    ///  "provider"   - CloudRedirect intercepting (folder provider on this machine)
+    ///  "real"       - straight to Valve UFS
+    /// </summary>
+    public static string SyncPosture(string steamPath, uint appId)
+    {
+        if (IsOstRedirected(steamPath, appId)) return "redirected";
+        if (IsCloudRedirectLoaded(steamPath)) return "provider";
+        return "real";
+    }
 }

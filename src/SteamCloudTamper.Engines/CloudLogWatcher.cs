@@ -116,4 +116,34 @@ public sealed class CloudLogWatcher
         if (started) return CloudVerdict.Failed;  // upload in flight but no verdict yet
         return CloudVerdict.Unknown;
     }
+
+    /// <summary>
+    /// Whether the RUNNING client ever AutoCloud-evaluates this app
+    /// (cloud_log: "[AppID N] AutoCloud checking local state"). Buckets the client
+    /// never AutoClouds (e.g. Spacewar 480 on modern clients) will NOT sync on their
+    /// own tick - those need the console command or an RPC upload as the real account.
+    /// </summary>
+    public static bool WasEverAutoClouded(string steamPath, uint appId)
+    {
+        var path = Path.Combine(steamPath, "logs", "cloud_log.txt");
+        if (!File.Exists(path)) return false;
+        try
+        {
+            // only the tail matters: last 1 MB of log history
+            var fi = new FileInfo(path);
+            const long window = 1024 * 1024;
+            var offset = Math.Max(0, fi.Length - window);
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            fs.Seek(offset, SeekOrigin.Begin);
+            using var reader = new StreamReader(fs);
+            while (reader.ReadLine() is { } line)
+            {
+                if (line.Contains($"[AppID {appId}]", StringComparison.OrdinalIgnoreCase)
+                    && line.Contains("AutoCloud checking local state", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch (IOException) { }
+        return false;
+    }
 }

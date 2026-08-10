@@ -10,10 +10,18 @@ public sealed record GameSlot(
     long Size,
     DateTime ParkedAt,
     string? BarcodePayload,
-    string Status)
+    string Status,
+    string? Posture = null)
 {
     public static GameSlot New(uint game, uint storage, string stored, string original, long size, string barcode)
         => new(game, storage, stored, original, size, DateTime.UtcNow, barcode, "parked");
+
+    /// <summary>
+    /// Where this slot's uploads actually land: "real" (Valve UFS), "provider"
+    /// (CloudRedirect folder provider), "redirected" (OST lua hook) or "local"
+    /// (staged offline, client never confirmed it). Recorded by the lane that wrote it.
+    /// </summary>
+    public GameSlot WithPosture(string posture) => this with { Posture = posture };
 }
 
 /// <summary>

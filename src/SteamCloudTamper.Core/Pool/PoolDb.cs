@@ -61,8 +61,9 @@ public static class PoolDb
             "Free Valve utility; probe before use."),
         new(1249230, "SteamVR Tutorial", 2021, true, SlotTier.HiddenDev, SlotState.Candidate, "ValveTool",
             "Free Valve utility; probe before use."),
-        new(7, "Steam Client", 2003, true, SlotTier.HiddenDev, SlotState.Blocked, "Internal",
-            "INTERNAL - server refuses all UFS operations since 2025 patch."),
+        new(7, "Steam Client", 2003, true, SlotTier.HiddenDev, SlotState.Candidate, "Internal",
+            "Steam's own config bucket - universally entitled, hidden, uncommon. cloud_log shows native syncs "
+            + "(Successfully synced to ChangeNumber) - probe decides upload capability."),
         new(760, "Screenshots", 2008, true, SlotTier.HiddenDev, SlotState.Blocked, "Internal",
             "INTERNAL - the SteamTools 760 dump site. Server refuses UFS ops. NOT FLOODED - this is the official stance."),
 

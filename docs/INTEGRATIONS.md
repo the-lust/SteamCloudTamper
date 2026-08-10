@@ -3,7 +3,8 @@
 | Tool | Lane | Status |
 |---|---|---|
 | **SCT CLI/TUI** | native | full (pool, park, ferry, barcode, registry, wipe, web) |
-| **SCT client lane** | running Steam session (no login): stage locally + `CloudLogWatcher` verdict | full |
+| **SCT client lane** | running Steam session (no login): stage locally + `CloudLogWatcher` verdict; AutoCloud tick only (Steam Console blocked on newer builds); non-AutoCloud buckets (480/113200) need `--lane rpc` for real uploads | full |
+| **SCT posture tracker** | per-slot `real` / `provider` / `redirected` / `local` in registry.json, derived live by `SteamLocator.SyncPosture()` (OST lua hook, CR toml/dll, else Valve) | full |
 | **gbe_fork** | `steam_settings\load_dlls\SteamCloudSave.dll` (auto `LoadLibraryW`) | shipped (tools/steamcloudsave) |
 | **OpenSteamTool** | `[cloud]` +CloudRedirect host, `[inject]` for SteamCloudSave.dll, Lua pool snippet — **GUI-synced lane, live-verified** (build from `main`, see OST-HOST-BUILD.md) | shipped (integrations/opensteamtool) |
 | **CloudRedirect** | provider engine: local-folder provider (`%AppData%\CloudRedirect\config.json` → `D:\sct_provider`) answers Cloud.* RPCs locally (127.0.0.1), so the Steam GUI shows "synced" for every `addappid()` game — no UFS uploads ever | shipped (v2.6.4) |

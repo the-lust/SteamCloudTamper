@@ -351,7 +351,8 @@ public static class Program
                 if (res == SteamKit2.EResult.OK)
                 {
                     var payload = $"{gameAppId}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
-                    _registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, p.D.StoredName!, p.F.FileName, p.Tagged.Length, payload));
+                    _registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, p.D.StoredName!, p.F.FileName, p.Tagged.Length, payload)
+                        .WithPosture("real"));
                     ok++;
                     AnsiConsole.MarkupLine($"  [green]{Ui.Icon("check")} {p.D.StoredName} @ {p.D.StorageAppId} ({res})[/]");
                 }
@@ -382,20 +383,22 @@ public static class Program
                 await File.WriteAllBytesAsync(Path.Combine(slotDir, p.D.StoredName!), p.Tagged);
             injector.RegenerateVdf(Path.Combine(userDataTuiRoot, slot.ToString()));
 
-            AnsiConsole.MarkupLine($"[dim]  [{slot}] staged {group.Count()} file(s); waiting for the client sync...[/]");
+            AnsiConsole.MarkupLine($"[dim]  [{slot}] staged {group.Count()} file(s); forcing client sync via console...[/]");
             var verdict = await AnsiConsole.Status()
-                .StartAsync($"Waiting for Steam client sync ({slot})...",
-                    _ => new CloudLogWatcher(_steamPath, slot).WaitForVerdictAsync(TimeSpan.FromSeconds(25)));
+                .StartAsync($"cloud_sync_up {slot} via Steam console...",
+                    _ => PushSyncTuiAsync(slot, 25));
 
             switch (verdict.Verdict)
             {
                 case CloudVerdict.Success:
                     _registry.PoolProbes[slot] = "VerifiedWritable";
-                    AnsiConsole.MarkupLine($"  [green]{Ui.Icon("check")} [{slot}] synced - {group.Count()} file(s) parked[/]");
+                    var posture = SteamLocator.SyncPosture(_steamPath, slot);
+                    AnsiConsole.MarkupLine($"  [green]{Ui.Icon("check")} [{slot}] synced - {group.Count()} file(s) parked ({(posture == "real" ? "real cloud" : posture == "provider" ? "CR provider" : "redirected")})[/]");
                     foreach (var p in group)
                     {
                         var payload = $"{gameAppIdOf(p)}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
-                        _registry.Upsert(GameSlot.New(gameAppIdOf(p), slot, p.D.StoredName!, p.F.FileName, p.Tagged.Length, payload));
+                        _registry.Upsert(GameSlot.New(gameAppIdOf(p), slot, p.D.StoredName!, p.F.FileName, p.Tagged.Length, payload)
+                            .WithPosture(posture));
                         ok++;
                     }
                     break;
@@ -410,7 +413,7 @@ public static class Program
                     AnsiConsole.MarkupLine($"  [red]  [{slot}] Denied by server - slot excluded, staged files removed[/]");
                     break;
                 default:
-                    AnsiConsole.MarkupLine($"  [yellow]  [{slot}] no verdict yet - files staged; client syncs on its next cloud tick[/]");
+                    AnsiConsole.MarkupLine($"  [yellow]  [{slot}] no verdict yet - files staged; client syncs on its own or use the RPC lane (Logon + park) for a real upload[/]");
                     break;
             }
             _registry.Save();
@@ -427,6 +430,17 @@ public static class Program
             return game;
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Client-lane sync pressure: wait for the RUNNING Steam client's own cloud
+    /// tick. The Steam Console is skipped (unreliable on newer client builds).
+    /// </summary>
+    private static async Task<(CloudVerdict Verdict, string? MatchLine, bool ConsoleAvailable)> PushSyncTuiAsync(uint appId, int waitSec, bool down = false)
+    {
+        if (!SteamLocator.IsRunning()) throw new InvalidOperationException("Steam is not running");
+        var result = await new CloudLogWatcher(_steamPath, appId).WaitForVerdictAsync(TimeSpan.FromSeconds(waitSec));
+        return (result.Verdict, result.MatchLine, false);
     }
 
     private static uint Acct3(SteamSession s) => (uint)(s.SteamId?.AccountID ?? 0);
@@ -471,9 +485,9 @@ public static class Program
                 {
                     if (_registry.Slots.Count == 0) { AnsiConsole.MarkupLine("[dim]empty registry - run a rebuild after parking[/]"); break; }
                     var tbl = new Table().Border(TableBorder.Rounded).Title("registry.json")
-                        .AddColumn("Game").AddColumn("Storage").AddColumn("Stored name").AddColumn("Original").AddColumn("Size").AddColumn("Status");
+                        .AddColumn("Game").AddColumn("Storage").AddColumn("Stored name").AddColumn("Original").AddColumn("Size").AddColumn("Status").AddColumn("Posture");
                     foreach (var s in _registry.Slots.OrderBy(s => s.StorageAppId).ThenBy(s => s.StoredName))
-                        tbl.AddRow(s.GameAppId.ToString(), s.StorageAppId.ToString(), Markup.Escape(s.StoredName), Markup.Escape(s.OriginalName), HumanSize(s.Size), s.Status);
+                        tbl.AddRow(s.GameAppId.ToString(), s.StorageAppId.ToString(), Markup.Escape(s.StoredName), Markup.Escape(s.OriginalName), HumanSize(s.Size), s.Status, s.Posture ?? "-");
                     AnsiConsole.Write(tbl);
                     AnsiConsole.MarkupLine($"[dim]{SctRegistry.DefaultPath()}[/]");
                     break;
@@ -535,8 +549,8 @@ public static class Program
                         injector.RegenerateVdf(userAppDir);
 
                         var verdict = await AnsiConsole.Status()
-                            .StartAsync($"Probing {slot.AppId} ({slot.Name})...", _ =>
-                                new CloudLogWatcher(_steamPath, slot.AppId).WaitForVerdictAsync(TimeSpan.FromSeconds(waitSec)));
+                            .StartAsync($"Probing {slot.AppId} ({slot.Name}) via console cloud_sync_up...", _ =>
+                                PushSyncTuiAsync(slot.AppId, waitSec));
 
                         switch (verdict.Verdict)
                         {
