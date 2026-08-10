@@ -303,6 +303,8 @@ public static class SteamLocator
     ///  "redirected" - OST lua addappid hook (never touches Valve)
     ///  "provider"   - CloudRedirect intercepting (folder provider on this machine)
     ///  "real"       - straight to Valve UFS
+    /// order matters: lua first, becuase a hooked app stays hooked no matter what
+    /// the toml says.
     /// </summary>
     public static string SyncPosture(string steamPath, uint appId)
     {

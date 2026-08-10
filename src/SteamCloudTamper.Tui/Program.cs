@@ -128,6 +128,8 @@ public static class Program
             catch (Exception ex)
             {
                 // a screen must never take the TUI down - report and go back to the menu
+                // (pro tip: this is a net. if it wasnt there the whole app would
+                //  dissapear on a silly QR timeout and we'd hear about it. again.)
                 AnsiConsole.MarkupLine($"[red]screen error: {Markup.Escape(ex.Message)}[/]");
             }
             Console.WriteLine();

@@ -1,5 +1,10 @@
 # Integration matrix — how SteamCloudSave/SCT plugs into the ecosystem
 
+roughly "what talks to what and who holds the flashlight". everything below was
+checked against the real build, the ones with (live) tags actually ran on a real
+steam install and we watched the logs. the rest is best-effort from the other
+projects' docs, so blame them if something drifts.
+
 | Tool | Lane | Status |
 |---|---|---|
 | **SCT CLI/TUI** | native | full (pool, park, ferry, barcode, registry, wipe, web) |
@@ -37,3 +42,6 @@ All lanes read/write the SAME files:
 - Registry file: `registry.json` (magic `SCTREG1`)
 - Trailer magic: `SCTB1`, payload `<gameAppId>|<uid3>|<DDMMYYYY>`
 - C# code: PascalCase public API, `SteamCloudSave` name in every project file name
+
+if ur writing a new lane and u violate the naming contract the registry will
+silently pretend u dont exist and we will both be sad. dont be sad. be consistent.

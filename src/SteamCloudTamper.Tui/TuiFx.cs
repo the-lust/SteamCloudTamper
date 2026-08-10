@@ -6,6 +6,9 @@ namespace SteamCloudTamper.Tui;
 /// Claude-style display effects: gradients, glow pulses, sine waves.
 /// Everything degrades gracefully - SCT_TUI_FLAT=1 kills all of it, and every
 /// animation is a plain overwrite-in-place so redirects/odd terminals can't break.
+///
+/// yes we know this is extra. the boss asked for "claude like" and now we all
+/// live here. there is a flat switch for a reason, use it if u hate fun.
 /// </summary>
 public static class TuiFx
 {

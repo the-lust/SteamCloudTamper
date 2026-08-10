@@ -157,6 +157,8 @@ public sealed class SteamSession : IAsyncDisposable
         {
             // SteamKit throws on auth failures (bad credentials, QR session dead,
             // challenge rotated away, CM refused) - those are failures, not crashes.
+            // (learned the hard way when the whole tui went poof on a TryAnotherCM.
+            //  steam said "try another CM", we tried the door. twice.)
             Event?.Invoke($"Auth error: {ex.Message}");
             return false;
         }

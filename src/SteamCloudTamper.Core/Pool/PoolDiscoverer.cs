@@ -68,6 +68,8 @@ public static class PoolDiscoverer
                 return;
             }
             // a redirected userdata bucket is really an activation container - the richer row wins
+            // (yes we fought about this ordering for an hour. no we dont remeber why the hour
+            //  was needed. the tests pass, thats what counts.)
             if (old.Source == ContainerSource.UserData && old.Posture == "redirected" && c.Source != ContainerSource.UserData)
             {
                 byApp[c.AppId] = c;
