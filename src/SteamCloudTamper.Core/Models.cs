@@ -30,9 +30,13 @@ public sealed record Bucket(uint AppId, Era Era, string Note, List<CloudFileEntr
 
 public sealed record SteamAccount(uint AccountId, ulong SteamId, string? DisplayName)
 {
+    public const ulong SteamIdBase = 76561197960265728;
+
     public static SteamAccount FromId3(uint id3) => new(id3, SteamIdFor(id3), null);
 
-    public static ulong SteamIdFor(uint id3) => (ulong)id3 * 2 + 0x0110000100000000;
+    public static ulong SteamIdFor(uint id3) => SteamIdBase + id3;
+
+    public static uint Id3FromSteamId(ulong steamId) => steamId > SteamIdBase ? (uint)(steamId - SteamIdBase) : 0;
 }
 
 public sealed record LocalAppState(

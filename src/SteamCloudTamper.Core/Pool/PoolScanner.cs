@@ -29,7 +29,24 @@ public static class PoolScanner
         {
             var name = Path.GetFileName(appDir);
             if (!uint.TryParse(name, out var storageAppId)) continue; // config/, ugcmsgcache/, ...
-            foreach (var file in Directory.EnumerateFiles(appDir))
+            ScanAppDir(appDir, storageAppId, accountId3, found);
+        }
+
+        sw.Stop();
+        return (found, sw.ElapsedMilliseconds);
+    }
+
+    /// <summary>Files live at the bucket root and/or in remote/ (parking + Steam both use it).</summary>
+    private static void ScanAppDir(string appDir, uint storageAppId, uint accountId3, List<TaggedFile> found)
+    {
+        var remote = Path.Combine(appDir, "remote");
+        var dirs = new List<string> { appDir };
+        if (Directory.Exists(remote) && !string.Equals(remote, appDir, StringComparison.OrdinalIgnoreCase))
+            dirs.Add(remote);
+
+        foreach (var dir in dirs)
+        {
+            foreach (var file in Directory.EnumerateFiles(dir))
             {
                 var info = new FileInfo(file);
                 if (info.Length < Barcode.TrailerOverheadBytes + 8) continue;
@@ -39,13 +56,11 @@ public static class PoolScanner
                 if (!Barcode.TryDecodeTail(tail, out var payload, out _)) continue;
                 var (game, uid, date) = Barcode.Parse(payload);
                 if (game == 0) continue;
+                if (uid == "probe") continue; // pool probe marker file - not a parked save
 
                 found.Add(new TaggedFile(game, storageAppId, accountId3, info.Name, info.Length, uid, date));
             }
         }
-
-        sw.Stop();
-        return (found, sw.ElapsedMilliseconds);
     }
 
     /// <summary>Scans the whole userdata root (all accounts) into the registry.</summary>

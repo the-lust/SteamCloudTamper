@@ -18,17 +18,20 @@ public static class Program
 
     public static async Task<int> Main()
     {
+        AnsiTerminal.Enable();
         var brand = Branding.RenderRawBrand();
         if (brand.Length > 0)
         {
-            foreach (var line in brand.Split('\n').Take(8))
-                Console.WriteLine(line.TrimEnd());
+            // raw ANSI passthrough - full file, every ESC color sequence intact
+            Console.Out.Write(brand);
+            if (!brand.EndsWith('\n')) Console.Out.WriteLine();
+            Console.Out.WriteLine();
         }
         else
         {
             AnsiConsole.MarkupLine("[bold aqua]STEAM CLOUD SAVER[/] - park, tag, ferry, survive.");
+            Console.WriteLine();
         }
-        Console.WriteLine();
 
         _cfg = AppConfig.Load(ConfigPath);
         _steamPath = _cfg.SteamPathOverride ?? SteamLocator.DetectInstallPath() ?? "";
@@ -77,7 +80,11 @@ public static class Program
     private static string MenuTitle()
     {
         var slots = _registry.Slots.Count;
-        return $"SCT | steam: [cyan]{_steamPath}[/] | accts: [yellow]{_accounts.Count}[/] | owned: [yellow]{_cfg.GetOwnedSet().Count}[/] | buckets: [yellow]{_buckets.Count}[/] | slots: [aqua]{slots}[/] | [{( _cfg.DryRun ? "green" : "red")}]{(_cfg.DryRun ? "dry-run" : "LIVE")}[/]";
+        var active = SteamLocator.GetActiveAccount(_steamPath);
+        var session = active is not null
+            ? $"{Ui.Icon("check")} [green]{active.AccountId}[/]{(SteamLocator.IsRunning() ? " (Steam running)" : "")}"
+            : "[red]no signed-in Steam[/]";
+        return $"SCT | steam: [cyan]{_steamPath}[/] | session: {session} | owned: [yellow]{_cfg.GetOwnedSet().Count}[/] | buckets: [yellow]{_buckets.Count}[/] | slots: [aqua]{slots}[/] | [{( _cfg.DryRun ? "green" : "red")}]{(_cfg.DryRun ? "dry-run" : "LIVE")}[/]";
     }
 
     private static void RefreshLocal()
@@ -274,71 +281,152 @@ public static class Program
         var files = _buckets.Where(b => b.AppId == gameAppId).SelectMany(b => b.Files).ToList();
         if (files.Count == 0) { AnsiConsole.MarkupLine("[dim]nothing to park[/]"); return; }
 
-        await using var session = await ConnectSessionAsync();
-        if (session is null) return;
-        var rpc = new CloudRpcClient(session);
+        var active = SteamLocator.GetActiveAccount(_steamPath);
+        var clientLane = active is not null && SteamLocator.IsRunning();
+        uint uid;
+        if (clientLane)
+        {
+            uid = active!.AccountId;
+            AnsiConsole.MarkupLine($"[dim]client lane: riding the signed-in Steam session ({uid}) - no SCT logon needed[/]");
+        }
+        else
+        {
+            await using var session = await ConnectSessionAsync();
+            if (session is null) return;
+            uid = Acct3(session);
+        }
 
-        var engine = new ParkingEngine(_cfg.GetOwnedSet(), _registry.Slots,
-            appId => Task.FromResult<RemoteBucketSnapshot?>(PoolRemoteSnapshotAsync(rpc, appId).GetAwaiter().GetResult()));
+        var spread = files.Count > 1 ? Math.Max(1, AnsiConsole.Ask("spread across N slots (1 = all in one):", 3)) : 1;
+        var stealth = files.Count > 0 && AnsiConsole.Confirm("hashed stealth names?", false);
 
-        AnsiConsole.MarkupLine($"[dim]{gameAppId}: running the allocator... owned-set: {_cfg.GetOwnedSet().Count}[/]");
+        var engine = new ParkingEngine(_cfg.GetOwnedSet(), _registry.Slots, poolProbes: _registry.PoolProbes);
+        var decisions = engine.Plan(gameAppId,
+            files.Select(f => new ParkFile(f.FileName, f.FileSize)).ToList(), stealth, spread, 1);
+
+        var plans = new List<(Bucket Origin, CloudFileEntry F, ParkingDecision D, byte[] Tagged)>();
+        var di = 0;
         var today = DateOnly.FromDateTime(DateTime.Now);
-        var plans = new List<(Bucket FileOrigin, CloudFileEntry F, ParkingDecision D, string Stored, byte[] Tagged)>();
-
         foreach (var f in files)
         {
+            var d = decisions[di++];
+            if (!d.Ok) { AnsiConsole.MarkupLine($"[yellow]  {f.FileName}: refused - {d.Reason}[/]"); continue; }
             var filePath = FindBucketFile(gameAppId, f.FileName);
-            var size = f.FileSize;
-            var decision = engine.Pick(gameAppId, f.FileName, size);
-            if (!decision.Ok) { AnsiConsole.MarkupLine($"[yellow]  {f.FileName}: refused - {decision.Reason}[/]"); continue; }
-
-            var stored = decision.StoredName!;
             if (filePath is { } path && File.Exists(path))
             {
                 var original = await File.ReadAllBytesAsync(path);
-                var trailer = Barcode.PackTrailer(gameAppId.ToString(), session.SteamId != null ? Acct3(session).ToString() : "?", today);
-                plans.Add((new Bucket(0, Era.Unknown, "", [f]), f, decision, stored, original.Concat(trailer).ToArray()));
+                var trailer = Barcode.PackTrailer(gameAppId.ToString(), uid.ToString(), today);
+                plans.Add((new Bucket(0, Era.Unknown, "", [f]), f, d, original.Concat(trailer).ToArray()));
             }
             else
             {
-                plans.Add((new Bucket(0, Era.Unknown, "", [f]), f, decision, stored, null!));
+                AnsiConsole.MarkupLine($"[yellow]  {f.FileName}: no local copy on disk - skipped[/]");
             }
         }
 
         if (plans.Count == 0) { AnsiConsole.MarkupLine("[yellow]nothing parkable[/]"); return; }
 
         foreach (var p in plans)
-        {
-            AnsiConsole.MarkupLine($"  [cyan]{p.F.FileName}[/] ({p.F.FileSize}b) -> [aqua]{p.Stored}[/] @ [bold]{p.D.StorageAppId}[/]");
-            AnsiConsole.MarkupLine($"    [dim]{p.D.Reason}[/]");
-        }
+            AnsiConsole.MarkupLine($"  [cyan]{p.F.FileName}[/] ({p.F.FileSize}b) -> [aqua]{p.D.StoredName}[/] @ [bold]{p.D.StorageAppId}[/]  [dim]{p.D.Reason}[/]");
 
         if (_cfg.DryRun)
         {
-            AnsiConsole.MarkupLine("[yellow]DRY-RUN[/] - enable LIVE mode in Settings to upload");
+            AnsiConsole.MarkupLine("[yellow]DRY-RUN[/] - enable LIVE mode in Settings to park");
             return;
         }
         if (!AnsiConsole.Confirm("Park now?")) return;
 
         var ok = 0;
-        foreach (var p in plans)
+        if (clientLane)
         {
-            if (p.Tagged.Length == 0) { AnsiConsole.MarkupLine($"  [red]{p.F.FileName}: no local copy on disk[/]"); continue; }
-            var res = await AnsiConsole.Status().StartAsync($"Parking {p.Stored}...", _ => rpc.UploadAsync(p.D.StorageAppId!.Value, p.Stored, p.Tagged));
-            if (res == SteamKit2.EResult.OK)
+            ok = await ClientLaneParkTuiAsync(engine, plans, uid, today);
+        }
+        else
+        {
+            await using var session = await ConnectSessionAsync();
+            if (session is null) return;
+            var rpc = new CloudRpcClient(session);
+            foreach (var p in plans)
             {
-                var payload = $"{gameAppId}{Barcode.Sep}{Acct3(session)}{Barcode.Sep}{today:ddMMyyyy}";
-                _registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, p.Stored, p.F.FileName, p.Tagged.Length, payload));
-                ok++;
-                AnsiConsole.MarkupLine($"  [green]{Ui.Icon("check")} {p.Stored} @ {p.D.StorageAppId} ({res})[/]");
-            }
-            else
-            {
-                AnsiConsole.MarkupLine($"  [red]{p.Stored}: {res}[/]");
+                var res = await AnsiConsole.Status().StartAsync($"Parking {p.D.StoredName}...", _ => rpc.UploadAsync(p.D.StorageAppId!.Value, p.D.StoredName!, p.Tagged));
+                if (res == SteamKit2.EResult.OK)
+                {
+                    var payload = $"{gameAppId}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
+                    _registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, p.D.StoredName!, p.F.FileName, p.Tagged.Length, payload));
+                    ok++;
+                    AnsiConsole.MarkupLine($"  [green]{Ui.Icon("check")} {p.D.StoredName} @ {p.D.StorageAppId} ({res})[/]");
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine($"  [red]{p.D.StoredName}: {res}[/]");
+                }
             }
         }
         _registry.Save();
         AnsiConsole.MarkupLine($"{ok}/{plans.Count} parked; registry saved");
+    }
+
+    private static async Task<int> ClientLaneParkTuiAsync(ParkingEngine engine,
+        List<(Bucket Origin, CloudFileEntry F, ParkingDecision D, byte[] Tagged)> plans, uint uid, DateOnly today)
+    {
+        var injector = new LocalInjectEngine();
+        var userDataTuiRoot = Path.Combine(_steamPath, "userdata", uid.ToString());
+        var bySlot = plans.GroupBy(p => p.D.StorageAppId!.Value).ToList();
+        var ok = 0;
+
+        foreach (var group in bySlot)
+        {
+            var slot = group.Key;
+            var slotDir = Path.Combine(userDataTuiRoot, slot.ToString(), "remote");
+            Directory.CreateDirectory(slotDir);
+            foreach (var p in group)
+                await File.WriteAllBytesAsync(Path.Combine(slotDir, p.D.StoredName!), p.Tagged);
+            injector.RegenerateVdf(Path.Combine(userDataTuiRoot, slot.ToString()));
+
+            AnsiConsole.MarkupLine($"[dim]  [{slot}] staged {group.Count()} file(s); waiting for the client sync...[/]");
+            var verdict = await AnsiConsole.Status()
+                .StartAsync($"Waiting for Steam client sync ({slot})...",
+                    _ => new CloudLogWatcher(_steamPath, slot).WaitForVerdictAsync(TimeSpan.FromSeconds(25)));
+
+            switch (verdict.Verdict)
+            {
+                case CloudVerdict.Success:
+                    _registry.PoolProbes[slot] = "VerifiedWritable";
+                    AnsiConsole.MarkupLine($"  [green]{Ui.Icon("check")} [{slot}] synced - {group.Count()} file(s) parked[/]");
+                    foreach (var p in group)
+                    {
+                        var payload = $"{gameAppIdOf(p)}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
+                        _registry.Upsert(GameSlot.New(gameAppIdOf(p), slot, p.D.StoredName!, p.F.FileName, p.Tagged.Length, payload));
+                        ok++;
+                    }
+                    break;
+                case CloudVerdict.Denied:
+                    _registry.PoolProbes[slot] = "Denied";
+                    foreach (var p in group)
+                    {
+                        var staged = Path.Combine(slotDir, p.D.StoredName!);
+                        if (File.Exists(staged)) File.Delete(staged);
+                    }
+                    injector.RegenerateVdf(Path.Combine(userDataTuiRoot, slot.ToString()));
+                    AnsiConsole.MarkupLine($"  [red]  [{slot}] Denied by server - slot excluded, staged files removed[/]");
+                    break;
+                default:
+                    AnsiConsole.MarkupLine($"  [yellow]  [{slot}] no verdict yet - files staged; client syncs on its next cloud tick[/]");
+                    break;
+            }
+            _registry.Save();
+        }
+        return ok;
+    }
+
+    private static uint gameAppIdOf((Bucket Origin, CloudFileEntry F, ParkingDecision D, byte[] Tagged) p)
+    {
+        var start = Math.Max(0, p.Tagged.Length - Barcode.TailWindowBytes);
+        if (Barcode.TryDecodeTail(p.Tagged.AsSpan(start), out var payload, out _))
+        {
+            var (game, _, _) = Barcode.Parse(payload);
+            return game;
+        }
+        return 0;
     }
 
     private static uint Acct3(SteamSession s) => (uint)(s.SteamId?.AccountID ?? 0);
@@ -375,7 +463,7 @@ public static class Program
         {
             var sub = AnsiConsole.Prompt(new SelectionPrompt<string>()
                 .Title($"{Ui.Icon("registry")} Registry & Parking Pool")
-                .AddChoices("Show registry slots", "Rebuild registry (scan barcodes)", "Show pool", "Refresh pool metadata", "Back"));
+                .AddChoices("Show registry slots", "Rebuild registry (scan barcodes)", "Show pool", "Refresh pool metadata", "Probe slots (private, via Steam client)", "Back"));
 
             switch (sub)
             {
@@ -402,9 +490,12 @@ public static class Program
                 case "Show pool":
                 {
                     var tbl = new Table().Border(TableBorder.Rounded).Title("Parking pool (owned games NEVER selected)")
-                        .AddColumn("Tier").AddColumn("App").AddColumn("Name").AddColumn("Free").AddColumn("Year").AddColumn("State").AddColumn("Note");
+                        .AddColumn("Tier").AddColumn("App").AddColumn("Name").AddColumn("Free").AddColumn("Year").AddColumn("State").AddColumn("Probe").AddColumn("Note");
                     foreach (var p in PoolDb.DefaultPool.OrderBy(p => p.Tier).ThenBy(p => p.AppId))
-                        tbl.AddRow(p.Tier.ToString(), p.AppId.ToString(), Markup.Escape(p.Name), p.IsFree ? "yes" : "no", p.ReleaseYear.ToString(), p.State.ToString(), Markup.Escape(p.Note));
+                    {
+                        var probe = _registry.PoolProbes.TryGetValue(p.AppId, out var ps) ? ps : "-";
+                        tbl.AddRow(p.Tier.ToString(), p.AppId.ToString(), Markup.Escape(p.Name), p.IsFree ? "yes" : "no", p.ReleaseYear.ToString(), p.State.ToString(), probe, Markup.Escape(p.Note));
+                    }
                     AnsiConsole.Write(tbl);
                     break;
                 }
@@ -415,6 +506,59 @@ public static class Program
                         await StoreApi.RefreshPoolAsync(PoolDb.DefaultPool.Select(p => p.AppId));
                     });
                     AnsiConsole.MarkupLine("[green]pool metadata refreshed[/]");
+                    break;
+                }
+                case "Probe slots (private, via Steam client)":
+                {
+                    var active = SteamLocator.GetActiveAccount(_steamPath);
+                    if (active is null || !SteamLocator.IsRunning())
+                    {
+                        AnsiConsole.MarkupLine("[red]need Steam running + signed in - the probe rides the client session[/]");
+                        break;
+                    }
+                    var waitSec = AnsiConsole.Ask("wait seconds per slot:", 20);
+                    var injector = new LocalInjectEngine();
+                    var candidates = PoolDb.Usable().OrderBy(p => p.Tier).ThenBy(p => p.AppId).ToList();
+                    AnsiConsole.MarkupLine($"[dim]probing {candidates.Count} candidate slot(s) as {active.AccountId} (one tiny private file each)...[/]");
+                    foreach (var slot in candidates)
+                    {
+                        var userAppDir = Path.Combine(_steamPath, "userdata", active.AccountId.ToString(), slot.AppId.ToString());
+                        var probePath = Path.Combine(userAppDir, "remote", "sctprobe.bin");
+                        if (!File.Exists(probePath))
+                        {
+                            var payload = $"{slot.AppId}{Barcode.Sep}probe{Barcode.Sep}{DateTime.Now:ddMMyyyy}";
+                            var probeBytes = new byte[64];
+                            Random.Shared.NextBytes(probeBytes);
+                            Directory.CreateDirectory(Path.Combine(userAppDir, "remote"));
+                            File.WriteAllBytes(probePath, probeBytes.Concat(Barcode.PackTrailer(payload)).ToArray());
+                        }
+                        injector.RegenerateVdf(userAppDir);
+
+                        var verdict = await AnsiConsole.Status()
+                            .StartAsync($"Probing {slot.AppId} ({slot.Name})...", _ =>
+                                new CloudLogWatcher(_steamPath, slot.AppId).WaitForVerdictAsync(TimeSpan.FromSeconds(waitSec)));
+
+                        switch (verdict.Verdict)
+                        {
+                            case CloudVerdict.Success:
+                                _registry.PoolProbes[slot.AppId] = "VerifiedWritable";
+                                AnsiConsole.MarkupLine($"  [green]{Ui.Icon("check")} {slot.AppId} {Markup.Escape(slot.Name)}: writable - probe removed[/]");
+                                File.Delete(probePath);
+                                injector.RegenerateVdf(userAppDir);
+                                break;
+                            case CloudVerdict.Denied:
+                                _registry.PoolProbes[slot.AppId] = "Denied";
+                                AnsiConsole.MarkupLine($"  [red]  {slot.AppId} {Markup.Escape(slot.Name)}: Denied - slot excluded[/]");
+                                File.Delete(probePath);
+                                injector.RegenerateVdf(userAppDir);
+                                break;
+                            default:
+                                AnsiConsole.MarkupLine($"  [yellow]  {slot.AppId} {Markup.Escape(slot.Name)}: no verdict yet[/]");
+                                break;
+                        }
+                        _registry.Save();
+                    }
+                    AnsiConsole.MarkupLine("[green]probe done - verdicts saved to the registry[/]");
                     break;
                 }
                 default: return;

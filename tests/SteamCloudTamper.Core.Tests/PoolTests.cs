@@ -132,6 +132,52 @@ public class ParkingEngineTests
         Assert.True(d.Ok);
         Assert.Equal(480u, d.StorageAppId);
     }
+
+    [Fact]
+    public void PlanSpreadsFilesAcrossSlots()
+    {
+        var engine = new ParkingEngine([], []);
+        var plan = engine.Plan(91330,
+            [new ParkFile("a.sav", 100), new ParkFile("b.sav", 100), new ParkFile("c.sav", 100)],
+            spread: 3);
+        Assert.All(plan, d => Assert.True(d.Ok));
+        var slots = plan.Select(d => d.StorageAppId).Distinct().ToList();
+        Assert.Equal(3, slots.Count); // top-3 usable: 480, 113200, 250820
+        Assert.Equal("91330_a.sav", plan[0].StoredName);
+    }
+
+    [Fact]
+    public void PlanCopiesMirrorToDistinctNames()
+    {
+        var engine = new ParkingEngine([], []);
+        var plan = engine.Plan(91330, [new ParkFile("save.sav", 100)], copies: 2);
+        Assert.Equal(2, plan.Count);
+        Assert.All(plan, d => Assert.True(d.Ok));
+        Assert.NotEqual(plan[0].StoredName, plan[1].StoredName);
+        Assert.Contains("c1", plan[0].StoredName!);
+        Assert.Contains("c2", plan[1].StoredName!);
+    }
+
+    [Fact]
+    public void PlanStealthHashesStoredNames()
+    {
+        var engine = new ParkingEngine([], []);
+        var plan = engine.Plan(91330, [new ParkFile("save.sav", 100)], stealth: true);
+        Assert.True(plan[0].Ok);
+        Assert.StartsWith("k000164c2", plan[0].StoredName!); // k{91330:x8}
+        Assert.EndsWith(".sav", plan[0].StoredName!);
+        Assert.DoesNotContain("91330_save", plan[0].StoredName);
+    }
+
+    [Fact]
+    public void ServerDeniedSlotIsExcludedFromPlanning()
+    {
+        var engine = new ParkingEngine([], [], poolProbes: new Dictionary<uint, string> { [480] = "Denied" });
+        var d = engine.Pick(91330, "save.sav", 1024);
+        Assert.True(d.Ok);
+        Assert.NotEqual(480u, d.StorageAppId);
+        Assert.Equal(113200u, d.StorageAppId); // next best usable slot
+    }
 }
 
 public class RegistryTests

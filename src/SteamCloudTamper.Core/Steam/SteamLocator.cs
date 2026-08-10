@@ -5,6 +5,53 @@ namespace SteamCloudTamper.Core.Steam;
 
 public static class SteamLocator
 {
+    /// <summary>A Logged-on-steam.exe / steam.exe process is alive right now.</summary>
+    public static bool IsRunning()
+    {
+        try { return System.Diagnostics.Process.GetProcessesByName("steam").Length > 0; }
+        catch { return false; }
+    }
+
+    /// <summary>The account Steam is currently signed in as (reads config/loginusers.vdf ActiveUser).</summary>
+    public static SteamAccount? GetActiveAccount(string steamPath)
+    {
+        var path = Path.Combine(steamPath, "config", "loginusers.vdf");
+        if (!File.Exists(path)) return null;
+
+        try
+        {
+            var root = VdfParser.ParseFile(path);
+            // loginusers.vdf wraps everything under "users" { ... }
+            var userNodes = root["users"]?.Children ?? root.Children;
+            var users = userNodes
+                .Where(c => ulong.TryParse(c.Key, out _))
+                .Select(c => new
+                {
+                    SteamId64 = ulong.Parse(c.Key),
+                    Active = c["ActiveUser"]?.Value == "1",
+                    AutoLogin = c["AutoLogin"]?.Value == "1",
+                    Timestamp = long.TryParse(c["Timestamp"]?.Value, out var ts) ? ts : 0L,
+                    Persona = c["PersonaName"]?.Value,
+                })
+                .OrderByDescending(u => u.Active)
+                .ThenByDescending(u => u.AutoLogin)
+                .ThenByDescending(u => u.Timestamp)
+                .ToList();
+
+            var user = users.FirstOrDefault();
+            if (user is null) return null;
+
+            // no network credential needed - the running client owns this session
+            var id3 = SteamAccount.Id3FromSteamId(user.SteamId64);
+            if (!Directory.Exists(Path.Combine(steamPath, "userdata", id3.ToString()))) return null;
+            return new SteamAccount(id3, user.SteamId64, user.Persona);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public static string? DetectInstallPath()
     {
         var candidates = new[]

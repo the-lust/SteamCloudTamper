@@ -24,6 +24,7 @@ public sealed record ParkingApp(
     bool IsFree,
     SlotTier Tier,
     SlotState State,
+    string Category,
     string Note)
 {
     public bool IsBlocked => State == SlotState.Blocked;
@@ -34,9 +35,12 @@ public sealed record ParkingApp(
 /// <summary>
 /// Curated parking pool: the only places SCT will store "foreign" save copies.
 /// Every candidate must be an AppID the account is entitled to regardless of library
-/// (hidden/dev apps, free games). 7/760 are enforced-blocked by Valve's patch (Apr 2025).
+/// (hidden/dev apps, free games, Valve tools). 7/760 are enforced-blocked by Valve's
+/// patch (Apr 2025). Policy: PRIVATE single-file cloud saves of real apps only -
+/// no public/anonymous flooding (the SteamTools 760 era is dead on purpose).
 /// CloudEnabled is not published via the store API - candidates get verified
-/// by live probe (upload+delete OK) before the registry marks them VerifiedWritable.
+/// by a private local probe (one tiny barcode-tagged file, client syncs, verdict
+/// read from cloud_log.txt) before the registry marks them VerifiedWritable.
 /// </summary>
 public static class PoolDb
 {
@@ -44,32 +48,42 @@ public static class PoolDb
 
     private static List<ParkingApp> Build() =>
     [
-        // ---- Tier 1: hidden / dev / test apps --------------------------------
-        new(480, "Spacewar", 2013, true, SlotTier.HiddenDev, SlotState.VerifiedWritable,
+        // ---- Tier 1: hidden / dev / Valve tools ------------------------------
+        new(480, "Spacewar", 2013, true, SlotTier.HiddenDev, SlotState.VerifiedWritable, "SteamDev",
             "Steam's hidden test game. Every account is entitled; bucket verified writable by SCT."),
-        new(113200, "Cloud test app", 2011, true, SlotTier.HiddenDev, SlotState.Candidate,
+        new(113200, "Cloud test app", 2011, true, SlotTier.HiddenDev, SlotState.Candidate, "SteamDev",
             "Steam cloud test app (empty bucket observed on real installs). Probe before use."),
-        new(250820, "SteamVR", 2016, true, SlotTier.HiddenDev, SlotState.Candidate,
+        new(250820, "SteamVR", 2016, true, SlotTier.HiddenDev, SlotState.Candidate, "ValveTool",
             "Hidden app; VR settings sync via cloud. Probe before use."),
-        new(413080, "SteamVR Home", 2016, true, SlotTier.HiddenDev, SlotState.Candidate,
+        new(413080, "SteamVR Home", 2016, true, SlotTier.HiddenDev, SlotState.Candidate, "ValveTool",
             "Hidden app; probe before use."),
-        new(7, "Steam Client", 2003, true, SlotTier.HiddenDev, SlotState.Blocked,
+        new(323370, "SteamVR Performance Test", 2016, true, SlotTier.HiddenDev, SlotState.Candidate, "ValveTool",
+            "Free Valve utility; probe before use."),
+        new(1249230, "SteamVR Tutorial", 2021, true, SlotTier.HiddenDev, SlotState.Candidate, "ValveTool",
+            "Free Valve utility; probe before use."),
+        new(7, "Steam Client", 2003, true, SlotTier.HiddenDev, SlotState.Blocked, "Internal",
             "INTERNAL - server refuses all UFS operations since 2025 patch."),
-        new(760, "Screenshots", 2008, true, SlotTier.HiddenDev, SlotState.Blocked,
-            "INTERNAL - the SteamTools 760 dump site. Server refuses UFS ops."),
+        new(760, "Screenshots", 2008, true, SlotTier.HiddenDev, SlotState.Blocked, "Internal",
+            "INTERNAL - the SteamTools 760 dump site. Server refuses UFS ops. NOT FLOODED - this is the official stance."),
 
         // ---- Tier 2: old, free, widely-entitled games -------------------------
-        new(230410, "Warframe", 2013, true, SlotTier.OldFree, SlotState.Candidate,
+        new(230410, "Warframe", 2013, true, SlotTier.OldFree, SlotState.Candidate, "FreeGame",
             "F2P, cloud-synced. Probe before use."),
-        new(359550, "Rainbow Six Siege", 2015, true, SlotTier.OldFree, SlotState.Candidate,
+        new(359550, "Rainbow Six Siege", 2015, true, SlotTier.OldFree, SlotState.Candidate, "FreeGame",
             "F2P since 2025?; probe before use."),
-        new(570, "Dota 2", 2013, true, SlotTier.OldFree, SlotState.Candidate,
+        new(570, "Dota 2", 2013, true, SlotTier.OldFree, SlotState.Candidate, "FreeGame",
             "F2P, cloud-synced; high visibility, crowded bucket."),
-        new(440, "Team Fortress 2", 2007, true, SlotTier.OldFree, SlotState.Candidate,
+        new(440, "Team Fortress 2", 2007, true, SlotTier.OldFree, SlotState.Candidate, "FreeGame",
             "F2P, cloud-synced; ancient, crowded bucket."),
-        new(730, "Counter-Strike 2", 2023, true, SlotTier.OldFree, SlotState.Candidate,
+        new(730, "Counter-Strike 2", 2023, true, SlotTier.OldFree, SlotState.Candidate, "FreeGame",
             "F2P successor of CS:GO (2012, old codebase)."),
-        new(322330, "Don't Starve Together", 2016, false, SlotTier.OwnedReserved, SlotState.Blocked,
+        new(218620, "PAYDAY 2", 2013, true, SlotTier.OldFree, SlotState.Candidate, "FreeGame",
+            "F2P since 2023. Probe before use."),
+        new(1085660, "Destiny 2", 2019, true, SlotTier.OldFree, SlotState.Candidate, "FreeGame",
+            "F2P since 2019. Probe before use."),
+        new(346110, "ARK Dev Kit", 2015, true, SlotTier.OldFree, SlotState.Candidate, "ModHost",
+            "Free modding tool - 'mods and tools' lane. Probe before use."),
+        new(322330, "Don't Starve Together", 2016, false, SlotTier.OwnedReserved, SlotState.Blocked, "Owned",
             "PAID - may only be used if genuinely owned; excluded by default."),
     ];
 

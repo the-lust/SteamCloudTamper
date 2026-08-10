@@ -32,6 +32,12 @@ public sealed class SctRegistry
 
     public List<GameSlot> Slots { get; set; } = [];
 
+    /// <summary>
+    /// Per-slot server verdicts from the private pool probe ("VerifiedWritable" / "Denied").
+    /// VerifiedWritable lets the pool prefer proven slots; Denied excludes them until revoked.
+    /// </summary>
+    public Dictionary<uint, string> PoolProbes { get; set; } = [];
+
     public static string DefaultPath()
     {
         var env = Environment.GetEnvironmentVariable("SCT_REGISTRY");
@@ -67,17 +73,23 @@ public sealed class SctRegistry
 
     public GameSlot? FindByGame(uint gameAppId) => Slots.FirstOrDefault(s => s.GameAppId == gameAppId);
 
-    public GameSlot? FindByStoredName(string storedName)
-        => Slots.FirstOrDefault(s => s.StoredName.Equals(storedName, StringComparison.OrdinalIgnoreCase));
+    public GameSlot? FindByStoredName(uint storageAppId, string storedName)
+        => Slots.FirstOrDefault(s =>
+            s.StorageAppId == storageAppId &&
+            s.StoredName.Equals(storedName, StringComparison.OrdinalIgnoreCase));
 
     public void Upsert(GameSlot slot)
     {
-        var idx = Slots.FindIndex(s => s.StoredName.Equals(slot.StoredName, StringComparison.OrdinalIgnoreCase));
+        var idx = Slots.FindIndex(s =>
+            s.StorageAppId == slot.StorageAppId &&
+            s.StoredName.Equals(slot.StoredName, StringComparison.OrdinalIgnoreCase));
         if (idx >= 0) Slots[idx] = slot; else Slots.Add(slot);
     }
 
-    public void Remove(string storedName)
-        => Slots.RemoveAll(s => s.StoredName.Equals(storedName, StringComparison.OrdinalIgnoreCase));
+    public void Remove(uint storageAppId, string storedName)
+        => Slots.RemoveAll(s =>
+            s.StorageAppId == storageAppId &&
+            s.StoredName.Equals(storedName, StringComparison.OrdinalIgnoreCase));
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 }

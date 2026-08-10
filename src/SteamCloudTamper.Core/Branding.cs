@@ -48,7 +48,8 @@ public static class Branding
             return;
         }
 
-        Console.Out.Write(brand);
+        // raw ANSI passthrough (VT enabled by the caller); stripped automatically when piped
+        Console.Out.Write(Console.IsOutputRedirected ? AnsiTerminal.StripAnsi(brand) : brand);
         if (!brand.EndsWith(Environment.NewLine, StringComparison.Ordinal) && !brand.EndsWith('\n'))
         {
             Console.Out.WriteLine();
