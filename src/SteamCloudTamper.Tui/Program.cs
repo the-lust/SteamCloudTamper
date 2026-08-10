@@ -62,18 +62,26 @@ public static class Program
                     $"{Ui.Icon("qr")} {TuiFx.Data("9")} Logon         - QR / credentials session (opens the real doors)",
                     $"{Ui.Icon("x")} {TuiFx.Data("0")} Quit"));
 
-            switch (choice[0])
+            try
             {
-                case '1': BucketsScreen(); break;
-                case '2': await RemoteScreenAsync(); break;
-                case '3': await FerryScreenAsync(); break;
-                case '4': await ParkScreenAsync(); break;
-                case '5': await WipeScreenAsync(); break;
-                case '6': await RegistryScreenAsync(); break;
-                case '7': GuardsScreen(); break;
-                case '8': SettingsScreen(); break;
-                case '9': await LogonScreenAsync(); break;
-                default: return 0;
+                switch (choice[0])
+                {
+                    case '1': BucketsScreen(); break;
+                    case '2': await RemoteScreenAsync(); break;
+                    case '3': await FerryScreenAsync(); break;
+                    case '4': await ParkScreenAsync(); break;
+                    case '5': await WipeScreenAsync(); break;
+                    case '6': await RegistryScreenAsync(); break;
+                    case '7': GuardsScreen(); break;
+                    case '8': SettingsScreen(); break;
+                    case '9': await LogonScreenAsync(); break;
+                    default: return 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                // a screen must never take the TUI down - report and go back to the menu
+                AnsiConsole.MarkupLine($"[red]screen error: {Markup.Escape(ex.Message)}[/]");
             }
             Console.WriteLine();
         }

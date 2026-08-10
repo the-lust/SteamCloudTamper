@@ -76,74 +76,100 @@ public sealed class SteamSession : IAsyncDisposable
         });
 
         Event?.Invoke("Connecting to Steam3...");
-        _client.Connect();
-        await _connected.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        try
+        {
+            _client.Connect();
+            await _connected.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        catch (TimeoutException)
+        {
+            Event?.Invoke("Timed out connecting to Steam3");
+            return false;
+        }
 
         var user = _client.GetHandler<SteamUser>();
         _callbacks.Subscribe<SteamUser.LoggedOnCallback>(OnLoggedOn);
 
-        switch (mode)
+        try
         {
-            case AuthMode.Anonymous:
+            switch (mode)
             {
-                Event?.Invoke("Logging on anonymously...");
-                user.LogOnAnonymous();
-                break;
-            }
-
-            case AuthMode.Credentials:
-            {
-                Event?.Invoke("Starting credential auth...");
-                var auth = _client.Authentication;
-                var session = await auth.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
+                case AuthMode.Anonymous:
                 {
-                    Username = username,
-                    Password = password,
-                    PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_SteamClient,
-                    DeviceFriendlyName = "SteamCloudTamper",
-                    Authenticator = new ConsoleAuthenticator(Event),
-                });
+                    Event?.Invoke("Logging on anonymously...");
+                    user.LogOnAnonymous();
+                    break;
+                }
 
-                var poll = await session.PollingWaitForResultAsync(_cts.Token);
-                Event?.Invoke($"Authenticated as {poll.AccountName} - logging on...");
-                user.LogOn(new SteamUser.LogOnDetails
+                case AuthMode.Credentials:
                 {
-                    Username = poll.AccountName,
-                    AccessToken = poll.AccessToken,
-                });
-                break;
-            }
+                    Event?.Invoke("Starting credential auth...");
+                    var auth = _client.Authentication;
+                    var session = await auth.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
+                    {
+                        Username = username,
+                        Password = password,
+                        PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_SteamClient,
+                        DeviceFriendlyName = "SteamCloudTamper",
+                        Authenticator = new ConsoleAuthenticator(Event),
+                    });
 
-            case AuthMode.Qr:
-            {
-                Event?.Invoke("Starting QR auth - scan in the Steam mobile app...");
-                var auth = _client.Authentication;
-                var qr = await auth.BeginAuthSessionViaQRAsync(new AuthSessionDetails
-                {
-                    PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_SteamClient,
-                    DeviceFriendlyName = "SteamCloudTamper",
-                });
+                    var poll = await session.PollingWaitForResultAsync(_cts.Token);
+                    Event?.Invoke($"Authenticated as {poll.AccountName} - logging on...");
+                    user.LogOn(new SteamUser.LogOnDetails
+                    {
+                        Username = poll.AccountName,
+                        AccessToken = poll.AccessToken,
+                    });
+                    break;
+                }
 
-                qr.ChallengeURLChanged += () =>
+                case AuthMode.Qr:
                 {
-                    ChallengeUrlChanged?.Invoke(qr.ChallengeURL);
+                    Event?.Invoke("Starting QR auth - scan in the Steam mobile app...");
+                    var auth = _client.Authentication;
+                    var qr = await auth.BeginAuthSessionViaQRAsync(new AuthSessionDetails
+                    {
+                        PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_SteamClient,
+                        DeviceFriendlyName = "SteamCloudTamper",
+                    });
+
+                    qr.ChallengeURLChanged += () =>
+                    {
+                        ChallengeUrlChanged?.Invoke(qr.ChallengeURL);
+                        Event?.Invoke($"QR: {qr.ChallengeURL}");
+                    };
                     Event?.Invoke($"QR: {qr.ChallengeURL}");
-                };
-                Event?.Invoke($"QR: {qr.ChallengeURL}");
-                ChallengeUrlChanged?.Invoke(qr.ChallengeURL);
+                    ChallengeUrlChanged?.Invoke(qr.ChallengeURL);
 
-                var poll = await qr.PollingWaitForResultAsync(_cts.Token);
-                Event?.Invoke($"Authenticated as {poll.AccountName} - logging on...");
-                user.LogOn(new SteamUser.LogOnDetails
-                {
-                    Username = poll.AccountName,
-                    AccessToken = poll.AccessToken,
-                });
-                break;
+                    var poll = await qr.PollingWaitForResultAsync(_cts.Token);
+                    Event?.Invoke($"Authenticated as {poll.AccountName} - logging on...");
+                    user.LogOn(new SteamUser.LogOnDetails
+                    {
+                        Username = poll.AccountName,
+                        AccessToken = poll.AccessToken,
+                    });
+                    break;
+                }
             }
         }
+        catch (Exception ex)
+        {
+            // SteamKit throws on auth failures (bad credentials, QR session dead,
+            // challenge rotated away, CM refused) - those are failures, not crashes.
+            Event?.Invoke($"Auth error: {ex.Message}");
+            return false;
+        }
 
-        await _logon.Task.WaitAsync(TimeSpan.FromSeconds(60));
+        try
+        {
+            await _logon.Task.WaitAsync(TimeSpan.FromSeconds(60));
+        }
+        catch (TimeoutException)
+        {
+            Event?.Invoke("Timed out waiting for logon result");
+            return false;
+        }
         SteamId = IsLoggedOn ? _client.SteamID : null;
         Cloud = new CloudRpcClient(this);
         return IsLoggedOn;
