@@ -1,4 +1,5 @@
 # SteamCloudSave <-> OpenSteamTool merge snippet (copy into D:\Steam\opensteamtool.toml)
+# Requires OpenSteamTool built from main (v1.4.8 release predates [cloud], see OST-HOST-BUILD.md).
 # SCT generates this file; it does not touch your Steam directory itself.
 
 [cloud]
@@ -8,7 +9,8 @@ enabled = true
 library = "cloud_redirect.dll"
 
 [inject]
-# Load SteamCloudSave.dll into every launched game process (optional shadow lane)
+# Load SteamCloudSave.dll into every launched game process (optional shadow lane).
+# Keep OFF unless the game runs with SteamCloudSave.dll as its steam_api surface.
 enabled = false
-# library_x64 = "D:\\tools\\SteamCloudSave\\x64\\SteamCloudSave.dll"
-# library_x86 = "D:\\tools\\SteamCloudSave\\x86\\SteamCloudSave.dll"
+# library_x64 = "D:\\steam-cloud-mod\\tools\\steamcloudsave\\SteamCloudSave.dll"
+# library_x86 = "D:\\steam-cloud-mod\\tools\\steamcloudsave\\SteamCloudSave.dll"

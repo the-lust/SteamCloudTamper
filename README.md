@@ -103,6 +103,24 @@ AutoLogin → most recent). When Steam is running with that account:
   until then the verdict stays "Unknown" and the staged copies are verified locally
   by `rebuild`'s barcode tail-scan instead.
 
+## Steam GUI shows "synced" (OST + CloudRedirect, live-verified 2026-08-10)
+
+For unowned games (Dead Cells 588650 etc.) the Steam client kept re-attempting the
+upload and the library showed a cloud sync error. Fix, verified end-to-end:
+
+- **OpenSteamTool built from `main`** (v1.4.8 release predates the `[cloud]` host,
+  see `integrations/opensteamtool/OST-HOST-BUILD.md`) + **CloudRedirect v2.6.4**
+  (`cloud_redirect.dll`) in `D:\Steam\`, `[cloud] enabled=true` in `opensteamtool.toml`.
+- CloudRedirect provider = **local folder** (`%AppData%\CloudRedirect\config.json`
+  → `D:\sct_provider`); every `addappid()` game becomes a redirected app whose
+  Cloud.* RPCs are answered locally (127.0.0.1 HTTP server).
+- Result in `logs/cloud_log.txt` for 588650:
+  `HTTP upload ... path /upload/1201110076/588650/user_0.dat - success.` →
+  `Upload complete, result OK` (previously `Access Denied` every sync), the client
+  accepted the change number in `remotecache.vdf`, and the bytes are stored at
+  `D:\sct_provider\1201110076\588650\blobs\`. Steam UI shows cloud synced with the
+  files listed; the SCT barcode-tagged parked copies in 480/113200 are untouched.
+
 Auth: anonymous by default (read-limited for unowned buckets; **uploads are denied to
 anonymous even for 480** - the RPC lane (`--rpc`, `ferry upload`, `remote-list`) needs a
 real session: `SCT_USER`/`SCT_PASS` or `SCT_AUTH_MODE=qr`).

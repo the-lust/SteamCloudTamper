@@ -1,0 +1,10 @@
+# CloudRedirect provider config — copy to %AppData%\CloudRedirect\config.json
+# The DLL resolves this path itself (RoamingAppData + "CloudRedirect").
+# Provider types: gdrive | onedrive | r2 | s3 | folder | local
+#   folder = real local folder / mapped drive, no token (what SCT uses)
+#   local  = local-only, nothing syncs
+# Provider layout: {sync_path}/{accountId}/{appId}/blobs/{filename} + metadata
+{
+  "provider": "folder",
+  "sync_path": "D:\\sct_provider"
+}

@@ -5,7 +5,8 @@
 | **SCT CLI/TUI** | native | full (pool, park, ferry, barcode, registry, wipe, web) |
 | **SCT client lane** | running Steam session (no login): stage locally + `CloudLogWatcher` verdict | full |
 | **gbe_fork** | `steam_settings\load_dlls\SteamCloudSave.dll` (auto `LoadLibraryW`) | shipped (tools/steamcloudsave) |
-| **OpenSteamTool** | `[cloud]` +CloudRedirect host, `[inject]` for SteamCloudSave.dll, Lua pool snippet | shipped (integrations/opensteamtool) |
+| **OpenSteamTool** | `[cloud]` +CloudRedirect host, `[inject]` for SteamCloudSave.dll, Lua pool snippet — **GUI-synced lane, live-verified** (build from `main`, see OST-HOST-BUILD.md) | shipped (integrations/opensteamtool) |
+| **CloudRedirect** | provider engine: local-folder provider (`%AppData%\CloudRedirect\config.json` → `D:\sct_provider`) answers Cloud.* RPCs locally (127.0.0.1), so the Steam GUI shows "synced" for every `addappid()` game — no UFS uploads ever | shipped (v2.6.4) |
 | **SteamTools / SLS / GreenLuma** | same family: integrate the parking brain or ship SteamCloudSave.dll | code to copy (Core/Pool) |
 | **online-fix.me** | their cracked steam_api64.dll is a steamclient-side shim; SteamCloudSave.dll can be load-listed or its exports copied | doc only |
 | **Millennium (SteamClientHomebrew)** | plugins are **JS/CSS for the Steam CEF UI**, not native DLLs — SCT integrates at the data layer (registry.json read by a tiny plugin) or via the `SteamCloudSave.dll` lanes; there is no native plugin slot | doc only |
