@@ -18,6 +18,46 @@ public static class Program
 
     public static async Task<int> Main()
     {
+        var crashLog = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SCT", "tui-crash.log");
+
+        // Ctrl+C must never silently kill the TUI: log it and turn it into a graceful
+        // "aborted" (the console-level handler still lets the OS stop us via window close).
+        Console.CancelKeyPress += (_, e) =>
+        {
+            WriteCrash(crashLog, "CancelKeyPress", new Exception("ctrl+c reached the TUI - captured" +
+                (AnsiConsole.Profile.Capabilities.Interactive ? " (interactive)" : " (non-interactive)")));
+            e.Cancel = true;
+        };
+
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            WriteCrash(crashLog, "UnhandledException", e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject?.ToString()));
+
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            WriteCrash(crashLog, "UnobservedTaskException", e.Exception);
+            e.SetObserved();
+        };
+
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            WriteCrash(crashLog, "ProcessExit", new Exception($"TUI exiting cleanly for pid={Environment.ProcessId}"));
+
+        WriteCrash(crashLog, "Boot", new Exception($"TUI booted pid={Environment.ProcessId} at {DateTime.UtcNow:HH:mm:ss}"));
+
+        try
+        {
+            return await MainInner(crashLog);
+        }
+        catch (Exception ex)
+        {
+            WriteCrash(crashLog, "TopLevel", ex);
+            AnsiConsole.MarkupLine($"[red]fatal: {Markup.Escape(ex.Message)}[/] - see {Markup.Escape(crashLog)}");
+            return 1;
+        }
+    }
+
+    private static async Task<int> MainInner(string crashLog)
+    {
         AnsiTerminal.Enable();
         var brand = Branding.RenderRawBrand();
         if (brand.Length > 0)
@@ -48,33 +88,40 @@ public static class Program
 
         while (true)
         {
-            var choice = AnsiConsole.Prompt(new SelectionPrompt<string>()
+            // Key + display label separated: the labels carry icon glyphs and ANSI markup,
+            // so dispatch on the KEY, never on choice[0] of the label.
+            var items = new (string Key, string Label)[]
+            {
+                ("1", $"{Ui.Icon("folder")} {TuiFx.Data("1")} Buckets       - audit local userdata"),
+                ("2", $"{Ui.Icon("cloud")} {TuiFx.Data("2")} Remote        - list cloud buckets via Steam"),
+                ("3", $"{Ui.Icon("ferry")} {TuiFx.Data("3")} Ferry         - park saves into owned AppID 480 (Spacewar)"),
+                ("4", $"{Ui.Icon("park")} {TuiFx.Data("4")} Park smart    - barcode park local buckets (never owned games)"),
+                ("5", $"{Ui.Icon("wipe")} {TuiFx.Data("5")} Wipe          - delete/blank bucket files (dry-run by default)"),
+                ("6", $"{Ui.Icon("registry")} {TuiFx.Data("6")} Registry     - slot map + parking pool"),
+                ("7", $"{Ui.Icon("shield")} {TuiFx.Data("7")} Guards        - never-touch appid list"),
+                ("8", $"{Ui.Icon("gear")} {TuiFx.Data("8")} Settings      - dry-run, owned list, steam path"),
+                ("9", $"{Ui.Icon("qr")} {TuiFx.Data("9")} Logon         - QR / credentials session (opens the real doors)"),
+                ("0", $"{Ui.Icon("x")} {TuiFx.Data("0")} Quit"),
+            };
+
+            var pick = AnsiConsole.Prompt(new SelectionPrompt<string>()
                 .Title(MenuTitle())
-                .AddChoices(
-                    $"{Ui.Icon("folder")} {TuiFx.Data("1")} Buckets       - audit local userdata",
-                    $"{Ui.Icon("cloud")} {TuiFx.Data("2")} Remote        - list cloud buckets via Steam",
-                    $"{Ui.Icon("ferry")} {TuiFx.Data("3")} Ferry         - park saves into owned AppID 480 (Spacewar)",
-                    $"{Ui.Icon("park")} {TuiFx.Data("4")} Park smart    - barcode park local buckets (never owned games)",
-                    $"{Ui.Icon("wipe")} {TuiFx.Data("5")} Wipe          - delete/blank bucket files (dry-run by default)",
-                    $"{Ui.Icon("registry")} {TuiFx.Data("6")} Registry     - slot map + parking pool",
-                    $"{Ui.Icon("shield")} {TuiFx.Data("7")} Guards        - never-touch appid list",
-                    $"{Ui.Icon("gear")} {TuiFx.Data("8")} Settings      - dry-run, owned list, steam path",
-                    $"{Ui.Icon("qr")} {TuiFx.Data("9")} Logon         - QR / credentials session (opens the real doors)",
-                    $"{Ui.Icon("x")} {TuiFx.Data("0")} Quit"));
+                .AddChoices(items.Select(i => i.Label)));
+            var key = items.First(i => i.Label == pick).Key;
 
             try
             {
-                switch (choice[0])
+                switch (key)
                 {
-                    case '1': BucketsScreen(); break;
-                    case '2': await RemoteScreenAsync(); break;
-                    case '3': await FerryScreenAsync(); break;
-                    case '4': await ParkScreenAsync(); break;
-                    case '5': await WipeScreenAsync(); break;
-                    case '6': await RegistryScreenAsync(); break;
-                    case '7': GuardsScreen(); break;
-                    case '8': SettingsScreen(); break;
-                    case '9': await LogonScreenAsync(); break;
+                    case "1": BucketsScreen(); break;
+                    case "2": await RemoteScreenAsync(); break;
+                    case "3": await FerryScreenAsync(); break;
+                    case "4": await ParkScreenAsync(); break;
+                    case "5": await WipeScreenAsync(); break;
+                    case "6": await RegistryScreenAsync(); break;
+                    case "7": GuardsScreen(); break;
+                    case "8": SettingsScreen(); break;
+                    case "9": await LogonScreenAsync(); break;
                     default: return 0;
                 }
             }
@@ -774,6 +821,20 @@ public static class Program
     private static void Footer(string hint)
     {
         TuiFx.Rule(hint);
+    }
+
+    private static void WriteCrash(string path, string kind, Exception ex)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.AppendAllText(path,
+                $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] {kind}:\n{ex}\n\n");
+        }
+        catch
+        {
+            // logging must never crash anything
+        }
     }
 
     private static string HumanSize(long b) =>
