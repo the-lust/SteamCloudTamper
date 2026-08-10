@@ -523,10 +523,46 @@ await using var session = await ConnectSessionAsync();
             {
                 return await PoolProbeCmd(args, config);
             }
+            case "discover":
+            {
+                return PoolDiscoverCmd(args, config);
+            }
             default:
-                Console.WriteLine("usage: pool list | refresh | probe [--uid <id3>] [--wait-sec N]");
+                Console.WriteLine("usage: pool list | refresh | probe [--uid <id3>] [--wait-sec N] | discover [--net]");
                 return 1;
         }
+    }
+
+    /// <summary>
+    /// Sweeps the machine for container AppIDs (PoolDb + userdata + OST lua hooks +
+    /// CloudRedirect host + SLS/GreenLuma) and saves the snapshot to the registry.
+    /// --net also reads cloud_log to flag which containers the client itself AutoClouds.
+    /// </summary>
+    private static int PoolDiscoverCmd(string[] args, AppConfig config)
+    {
+        var steam = ResolveSteam(config);
+        var registry = SctRegistry.Load();
+
+        Func<uint, bool>? autoClouded = null;
+        if (Has(args, "--net"))
+            autoClouded = appId => CloudLogWatcher.WasEverAutoClouded(steam, appId);
+
+        registry.SyncDiscovered(steam, autoClouded);
+
+        var rows = registry.Discovered;
+        Console.WriteLine($"Container universe for {steam} ({rows.Count} container(s)):");
+        Console.WriteLine($"  {"APPID",-8} {"KIND",-10} {"SOURCE",-10} {"POSTURE",-10} {"AUTO",-5} NAME / NOTE");
+        foreach (var c in rows)
+        {
+            var name = string.IsNullOrEmpty(c.Name)
+                ? c.Note ?? ""
+                : c.Note is null ? c.Name : $"{c.Name} - {c.Note}";
+            Console.WriteLine($"  {c.AppId,-8} {c.Kind,-10} {c.Source,-10} {c.Posture,-10} {(c.AutoClouded ? "yes" : ""),-5} {name}");
+        }
+        var real = rows.Count(c => c.IsRealCandidate);
+        var activation = rows.Count(c => c.Kind == ContainerKind.Activation);
+        Console.WriteLine($"{real} real/provider container(s), {activation} activation-tool container(s). Registry saved.");
+        return 0;
     }
 
     /// <summary>
@@ -1297,6 +1333,9 @@ await using var session = await ConnectSessionAsync();
                                       probe = one-private-file writability check via console lane
                                       (forced cloud_sync_up through the RUNNING Steam client);
                                       verdicts saved to the registry
+                pool discover [--net] = sweep machine for container AppIDs (PoolDb + userdata +
+                                      OST lua hooks + CloudRedirect host + SLS/GreenLuma) and save
+                                      the snapshot to the registry; --net flags AutoClouded from cloud_log
                 park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>]
                      [--spread N] [--copies N] [--stealth] [--wait-sec N]
                                       auto   = Steam up + account active -> client; else rpc

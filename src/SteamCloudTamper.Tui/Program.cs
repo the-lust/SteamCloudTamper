@@ -26,11 +26,13 @@ public static class Program
             Console.Out.Write(brand);
             if (!brand.EndsWith('\n')) Console.Out.WriteLine();
             Console.Out.WriteLine();
+            TuiFx.Reveal();
         }
         else
         {
             AnsiConsole.MarkupLine("[bold aqua]STEAM CLOUD SAVER[/] - park, tag, ferry, survive.");
             Console.WriteLine();
+            TuiFx.Splash();
         }
 
         _cfg = AppConfig.Load(ConfigPath);
@@ -49,16 +51,16 @@ public static class Program
             var choice = AnsiConsole.Prompt(new SelectionPrompt<string>()
                 .Title(MenuTitle())
                 .AddChoices(
-                    $"{Ui.Icon("folder")} [cyan]1[/] Buckets       - audit local userdata",
-                    $"{Ui.Icon("cloud")} [cyan]2[/] Remote        - list cloud buckets via Steam",
-                    $"{Ui.Icon("ferry")} [cyan]3[/] Ferry         - park saves into owned AppID 480 (Spacewar)",
-                    $"{Ui.Icon("park")} [cyan]4[/] Park smart    - barcode park local buckets (never owned games)",
-                    $"{Ui.Icon("wipe")} [cyan]5[/] Wipe          - delete/blank bucket files (dry-run by default)",
-                    $"{Ui.Icon("registry")} [cyan]6[/] Registry     - slot map + parking pool",
-                    $"{Ui.Icon("shield")} [cyan]7[/] Guards        - never-touch appid list",
-                    $"{Ui.Icon("gear")} [cyan]8[/] Settings      - dry-run, owned list, steam path",
-                    $"{Ui.Icon("qr")} [cyan]9[/] Logon         - QR / credentials session (opens the real doors)",
-                    $"{Ui.Icon("x")} [red]0[/] Quit"));
+                    $"{Ui.Icon("folder")} {TuiFx.Data("1")} Buckets       - audit local userdata",
+                    $"{Ui.Icon("cloud")} {TuiFx.Data("2")} Remote        - list cloud buckets via Steam",
+                    $"{Ui.Icon("ferry")} {TuiFx.Data("3")} Ferry         - park saves into owned AppID 480 (Spacewar)",
+                    $"{Ui.Icon("park")} {TuiFx.Data("4")} Park smart    - barcode park local buckets (never owned games)",
+                    $"{Ui.Icon("wipe")} {TuiFx.Data("5")} Wipe          - delete/blank bucket files (dry-run by default)",
+                    $"{Ui.Icon("registry")} {TuiFx.Data("6")} Registry     - slot map + parking pool",
+                    $"{Ui.Icon("shield")} {TuiFx.Data("7")} Guards        - never-touch appid list",
+                    $"{Ui.Icon("gear")} {TuiFx.Data("8")} Settings      - dry-run, owned list, steam path",
+                    $"{Ui.Icon("qr")} {TuiFx.Data("9")} Logon         - QR / credentials session (opens the real doors)",
+                    $"{Ui.Icon("x")} {TuiFx.Data("0")} Quit"));
 
             switch (choice[0])
             {
@@ -84,7 +86,7 @@ public static class Program
         var session = active is not null
             ? $"{Ui.Icon("check")} [green]{active.AccountId}[/]{(SteamLocator.IsRunning() ? " (Steam running)" : "")}"
             : "[red]no signed-in Steam[/]";
-        return $"SCT | steam: [cyan]{_steamPath}[/] | session: {session} | owned: [yellow]{_cfg.GetOwnedSet().Count}[/] | buckets: [yellow]{_buckets.Count}[/] | slots: [aqua]{slots}[/] | [{( _cfg.DryRun ? "green" : "red")}]{(_cfg.DryRun ? "dry-run" : "LIVE")}[/]";
+        return $"{TuiFx.Brand("SCT")} | steam: [cyan]{_steamPath}[/] | session: {session} | owned: [yellow]{_cfg.GetOwnedSet().Count}[/] | buckets: [yellow]{_buckets.Count}[/] | slots: [aqua]{slots}[/] | {TuiFx.Glow(_cfg.DryRun ? "dry-run" : "LIVE")}";
     }
 
     private static void RefreshLocal()
@@ -130,7 +132,7 @@ public static class Program
     {
         var table = new Table()
             .Border(TableBorder.Rounded)
-            .Title($"{Ui.Icon("folder")} Local buckets (userdata)")
+            .Title(TuiFx.Title($"{Ui.Icon("folder")} Local buckets (userdata)"))
             .AddColumn(new TableColumn("App").Centered())
             .AddColumn(new TableColumn("Era"))
             .AddColumn(new TableColumn("Files").Centered())
@@ -177,7 +179,7 @@ public static class Program
             {
                 var files = await AnsiConsole.Status()
                     .StartAsync($"Listing {appId}...", _ => rpc.EnumerateAsync(appId));
-                var table = new Table().Border(TableBorder.Rounded).Title($"Remote {appId}")
+                var table = new Table().Border(TableBorder.Rounded).Title(TuiFx.Title($"Remote {appId}"))
                     .AddColumn("File").AddColumn("Size").AddColumn("Time").AddColumn("SHA");
                 foreach (var f in files)
                     table.AddRow(Markup.Escape(f.FileName), HumanSize(f.FileSize), f.Timestamp.ToString(), ShortSha(f.FileSha));
@@ -211,14 +213,14 @@ public static class Program
         while (true)
         {
             var choice = AnsiConsole.Prompt(new SelectionPrompt<string>()
-                .Title("Ferry (AppID 480 / Spacewar)")
+                .Title(TuiFx.Title("Ferry (AppID 480 / Spacewar)"))
                 .AddChoices("List parked", "Upload local file", "Download parked", "Back"));
             switch (choice)
             {
                 case "List parked":
                 {
                     var files = await AnsiConsole.Status().StartAsync("Fetching...", _ => rpc.EnumerateAsync(Ferry.SpacewarApp));
-                    var tbl = new Table().Border(TableBorder.Rounded).Title("Parked in 480")
+                    var tbl = new Table().Border(TableBorder.Rounded).Title(TuiFx.Title("Parked in 480"))
                         .AddColumn("Name").AddColumn("Size").AddColumn("Time").AddColumn("Origin");
                     foreach (var f in files)
                     {
@@ -266,7 +268,7 @@ public static class Program
 
         var labels = candidates.Select(b => $"{b.AppId}  ({b.Files.Count} files, {HumanSize(b.TotalBytes)})").ToList();
         var pick = new SelectionPrompt<string>()
-            .Title($"{Ui.Icon("park")} Pick a bucket to park (upload + barcode-tag)")
+                .Title(TuiFx.Title($"{Ui.Icon("park")} Pick a bucket to park (upload + barcode-tag)"))
             .AddChoices(labels);
         pick.AddChoice("Back");
         var choice = AnsiConsole.Prompt(pick);
@@ -476,15 +478,15 @@ public static class Program
         while (true)
         {
             var sub = AnsiConsole.Prompt(new SelectionPrompt<string>()
-                .Title($"{Ui.Icon("registry")} Registry & Parking Pool")
-                .AddChoices("Show registry slots", "Rebuild registry (scan barcodes)", "Show pool", "Refresh pool metadata", "Probe slots (private, via Steam client)", "Back"));
+                .Title(TuiFx.Title($"{Ui.Icon("registry")} Registry & Parking Pool"))
+                .AddChoices("Show registry slots", "Rebuild registry (scan barcodes)", "Show pool", "Refresh pool metadata", "Show discovered containers", "Probe slots (private, via Steam client)", "Back"));
 
             switch (sub)
             {
                 case "Show registry slots":
                 {
                     if (_registry.Slots.Count == 0) { AnsiConsole.MarkupLine("[dim]empty registry - run a rebuild after parking[/]"); break; }
-                    var tbl = new Table().Border(TableBorder.Rounded).Title("registry.json")
+                    var tbl = new Table().Border(TableBorder.Rounded).Title(TuiFx.Title("registry.json"))
                         .AddColumn("Game").AddColumn("Storage").AddColumn("Stored name").AddColumn("Original").AddColumn("Size").AddColumn("Status").AddColumn("Posture");
                     foreach (var s in _registry.Slots.OrderBy(s => s.StorageAppId).ThenBy(s => s.StoredName))
                         tbl.AddRow(s.GameAppId.ToString(), s.StorageAppId.ToString(), Markup.Escape(s.StoredName), Markup.Escape(s.OriginalName), HumanSize(s.Size), s.Status, s.Posture ?? "-");
@@ -503,7 +505,7 @@ public static class Program
                 }
                 case "Show pool":
                 {
-                    var tbl = new Table().Border(TableBorder.Rounded).Title("Parking pool (owned games NEVER selected)")
+                    var tbl = new Table().Border(TableBorder.Rounded).Title(TuiFx.Title("Parking pool (owned games NEVER selected)"))
                         .AddColumn("Tier").AddColumn("App").AddColumn("Name").AddColumn("Free").AddColumn("Year").AddColumn("State").AddColumn("Probe").AddColumn("Note");
                     foreach (var p in PoolDb.DefaultPool.OrderBy(p => p.Tier).ThenBy(p => p.AppId))
                     {
@@ -520,6 +522,21 @@ public static class Program
                         await StoreApi.RefreshPoolAsync(PoolDb.DefaultPool.Select(p => p.AppId));
                     });
                     AnsiConsole.MarkupLine("[green]pool metadata refreshed[/]");
+                    break;
+                }
+                case "Show discovered containers":
+                {
+                    _registry.SyncDiscovered(_steamPath,
+                        appId => CloudLogWatcher.WasEverAutoClouded(_steamPath, appId));
+                    var tbl = new Table().Border(TableBorder.Rounded)
+                        .Title(TuiFx.Title("Discovered containers (smart appid switching universe)"))
+                        .AddColumn("App").AddColumn("Name").AddColumn("Kind").AddColumn("Source").AddColumn("Posture").AddColumn("AutoClouded").AddColumn("Note");
+                    foreach (var c in _registry.Discovered)
+                        tbl.AddRow(c.AppId.ToString(), Markup.Escape(c.Name ?? "-"), c.Kind.ToString(), c.Source.ToString(), c.Posture, c.AutoClouded ? "yes" : "-", Markup.Escape(c.Note ?? ""));
+                    AnsiConsole.Write(tbl);
+                    var real = _registry.Discovered.Count(c => c.IsRealCandidate);
+                    var activation = _registry.Discovered.Count(c => c.Kind == ContainerKind.Activation);
+                    AnsiConsole.MarkupLine($"[dim]{real} real/provider container(s), {activation} activation-tool container(s) - saved to the registry[/]");
                     break;
                 }
                 case "Probe slots (private, via Steam client)":
@@ -590,7 +607,7 @@ public static class Program
         if (targets.Count == 0) { AnsiConsole.MarkupLine("[dim]no local buckets[/]"); return; }
 
         var labels = targets.Select(t => $"{t.Bucket.AppId}/{t.f.FileName} ({HumanSize(t.f.FileSize)})").ToList();
-        var pick = AnsiConsole.Prompt(new SelectionPrompt<string>().Title("Choose file to wipe").AddChoices(labels));
+        var pick = AnsiConsole.Prompt(new SelectionPrompt<string>().Title(TuiFx.Title("Choose file to wipe")).AddChoices(labels));
         var chosen = targets[labels.IndexOf(pick)];
 
         await using var session = await ConnectSessionAsync();
@@ -615,7 +632,7 @@ public static class Program
     private static void GuardsScreen()
     {
         var sub = AnsiConsole.Prompt(new SelectionPrompt<string>()
-            .Title("Guards")
+            .Title(TuiFx.Title("Guards"))
             .AddChoices("Show", "Add appid", "Remove appid", "Back"));
         switch (sub)
         {
@@ -641,7 +658,7 @@ public static class Program
     private static async Task LogonScreenAsync()
     {
         var mode = AnsiConsole.Prompt(new SelectionPrompt<string>()
-            .Title($"{Ui.Icon("qr")} Steam session logon")
+            .Title(TuiFx.Title($"{Ui.Icon("qr")} Steam session logon"))
             .AddChoices("QR code (Steam mobile app)", "Credentials (SCT_USER / SCT_PASS)", "Anonymous (read-limited)", "Back"));
 
         var session = new SteamSession();
@@ -709,7 +726,7 @@ public static class Program
     private static void SettingsScreen()
     {
         var sub = AnsiConsole.Prompt(new SelectionPrompt<string>()
-            .Title("Settings")
+            .Title(TuiFx.Title("Settings"))
             .AddChoices("Toggle dry-run/live", "Steam path", "Owned appids", "Back"));
         switch (sub)
         {
@@ -748,7 +765,7 @@ public static class Program
 
     private static void Footer(string hint)
     {
-        AnsiConsole.Write(new Rule($" [dim]{Markup.Escape(hint)}[/]").RuleStyle("grey"));
+        TuiFx.Rule(hint);
     }
 
     private static string HumanSize(long b) =>

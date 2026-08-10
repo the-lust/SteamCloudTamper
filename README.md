@@ -16,10 +16,10 @@ Find every cloud bucket that references stale usernames/configs, probe what Stea
 - `src/SteamCloudTamper.Cli` - CLI commands
 - `src/SteamCloudTamper.Tui` - Spectre.Console interactive manager (buckets/remote/ferry/park/wipe/registry/guards/settings/QR logon) with Unicode/Nerd/ASCII icon sets + live in-terminal QR
 - `src/SteamCloudTamper` - **the single binary**: `SteamCloudTamper.exe` - no args + console = TUI, flags = CLI (dispatches into the Cli/Tui projects; nothing deleted)
-- `tools/SteamCloudTamper.ApiProbe` - reflection dump of SteamKit2 API surface (dev aid)
+- `tools/publish.ps1` - builds ONE self-contained single-file exe into `dist/` (gitignored; no .NET runtime needed, double-click = TUI)
 - `tools/steamcloudsave` - `SteamCloudSave.dll`: steam_api64 shim + RemoteStorage shadow lane (mount: shim / gbe `load_dlls` / OST `[inject]`)
 - `integrations/opensteamtool` - OST toml merge snippet, Lua pool snippet, GUI-satisfaction guide (CloudRedirect)
-- `tests/SteamCloudTamper.Core.Tests` - unit tests (barcode, pool, allocator, registry)
+- `tests/SteamCloudTamper.Core.Tests` - unit tests (barcode, pool, allocator, registry, discovery)
 
 ## Commands
 
@@ -36,8 +36,14 @@ lock/unlock <uid3> <appid>                    read-only file blocks Steam folder
 relocate/unrelocate <uid3> <appid>            junction-isolate bucket into SCT stash
 
 parking brain (anti-ban: private cloud saves of real apps only, never public flooding):
-    pool list | refresh           curated parking-slot pool (owned games NEVER selected)
-    pool probe [--uid <id3>] [--force] [--wait-sec N]
+pool list | refresh           curated parking-slot pool (owned games NEVER selected)
+                pool discover [--net]         sweep the machine for container AppIDs (PoolDb +
+                                              userdata buckets + OST lua hooks + CloudRedirect host
+                                              + SLS/Goldberg steam_settings + GreenLuma whitelists),
+                                              posture + AutoClouded per container, snapshot saved
+                                              to the registry; --net also flags AutoClouded from
+                                              cloud_log
+                pool probe [--uid <id3>] [--force] [--wait-sec N]
                                   one-private-file writability probe through the RUNNING
                                   Steam client (no logon); verdicts saved to the registry
     park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>]
@@ -66,14 +72,38 @@ ferry (park saves into owned AppID 480 / Spacewar bucket):
     ferry ls | upload <local-file> [name] | dl <name> [outfile]
 ```
 
-Single binary: `SteamCloudTamper.exe` (TUI with no args on a console; CLI with flags).
+Single binary: `dist\SteamCloudTamper.exe` (TUI with no args on a console; CLI with flags;
+self-contained, no .NET needed - `tools/publish.ps1` builds it).
 Run from the repo: `dotnet run --project src/SteamCloudTamper -- <command>`
 (net10 SDK at `C:\Users\kaneki\dotnet10`, or set `DOTNET_ROOT` to it for the published exe).
 
 TUI (interactive manager): `dotnet run --project src/SteamCloudTamper.Tui`
 - 9 screens: Buckets / Remote / Ferry / **Park smart** / Wipe / **Registry&Pool** / Guards / Settings / **Logon (QR)**
+- Registry screen gained "Show discovered containers" (the smart-appid universe)
 - QR login renders the challenge as a live in-terminal QR (Unicode half-blocks, ASCII fallback)
 - Icons: Unicode by default; `SCT_TUI_ASCII=1` ASCII; `SCT_TUI_NERD=1` Nerd-Font glyphs
+- Effects: gradient/glow/sine polish; `SCT_TUI_FLAT=1` disables every effect
+
+## Smart appid containers (discovery)
+
+`pool discover` builds the **container universe** - every AppID SCT may park unowned-game
+saves into - and saves it into the registry (`registry.json` -> `Discovered`). Sources:
+
+- PoolDb curated slots (Spacewar 480, Steam Client 7, SteamVR tools, free games, mod hosts)
+- real `userdata/<uid>/<appid>` buckets (owned-library games)
+- OST Lua `addappid` hooks (`config/lua/*.lua`; e.g. this machine: 113200, 1623730, 3164500,
+  3722330, 588650 + bump variants) - these never touch Valve
+- CloudRedirect host marker (`opensteamtool.toml [cloud]` + dll) - posture `provider`
+- SLS/Goldberg `steam_settings/appid.txt` and GreenLuma `appidwhitelist.txt` (auto-probed,
+  skipped when absent)
+
+Each container carries `kind` (owned / free / hidden / modhost / activation), `source`,
+`posture` (real / provider / redirected) and - with `--net` - whether the client itself
+AutoClouds it (read from `logs/cloud_log.txt`). Posture ranks where uploads land: a
+lua-hooked bucket is `redirected` (never Valve) and is disfavored for the RPC lane;
+real Valve-touching containers are the ones that matter for durable storage. Owned-game
+buckets appear in the universe but parking still never selects them without explicit
+user consent. The TUI shows the same screen: Registry -> "Show discovered containers".
 
 ## The barcode lane (what makes parking self-describing)
 

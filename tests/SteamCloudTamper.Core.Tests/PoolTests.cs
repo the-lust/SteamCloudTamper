@@ -316,4 +316,138 @@ public class RegistryTests
             File.Delete(path);
         }
     }
+
+    [Fact]
+    public void SyncDiscoveredPersistsSnapshot()
+    {
+        var steam = Path.Combine(Path.GetTempPath(), $"sct_steam_{Guid.NewGuid():N}");
+        var uid = 1201110076u;
+        Directory.CreateDirectory(Path.Combine(steam, "userdata", uid.ToString(), "480", "remote"));
+        Directory.CreateDirectory(Path.Combine(steam, "config", "lua"));
+        File.WriteAllText(Path.Combine(steam, "config", "lua", "588650.lua"), "addappid(588650)\n");
+        var path = Path.Combine(Path.GetTempPath(), $"sct_reg_{Guid.NewGuid():N}.json");
+        try
+        {
+            var reg = new SctRegistry();
+            reg.SyncDiscovered(steam, path: path);
+            Assert.Contains(reg.Discovered, c => c.AppId == 480);
+            Assert.Contains(reg.Discovered, c => c.AppId == 588650 && c.Source == ContainerSource.OstLua);
+
+            var loaded = SctRegistry.Load(path);
+            Assert.Contains(loaded.Discovered, c => c.AppId == 480);
+            Assert.Contains(loaded.Discovered, c => c.AppId == 7);
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+            File.Delete(path);
+        }
+    }
+}
+
+public class PoolDiscovererTests
+{
+    private static string NewSteam()
+    {
+        var steam = Path.Combine(Path.GetTempPath(), $"sct_steam_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(steam);
+        return steam;
+    }
+
+    [Fact]
+    public void DiscoversPoolUserDataAndLuaContainers()
+    {
+        var steam = NewSteam();
+        var uid = 1201110076u;
+        Directory.CreateDirectory(Path.Combine(steam, "userdata", uid.ToString(), "480", "remote"));
+        Directory.CreateDirectory(Path.Combine(steam, "userdata", uid.ToString(), "588650", "remote"));
+        Directory.CreateDirectory(Path.Combine(steam, "config", "lua"));
+        File.WriteAllText(Path.Combine(steam, "config", "lua", "hooks.lua"), "addappid(588650)\naddappid(113200)\n");
+        try
+        {
+            var found = PoolDiscoverer.Discover(steam);
+            Assert.Contains(found, c => c.AppId == 480 && c.Source == ContainerSource.PoolDb && c.Name == "Spacewar");
+            Assert.Contains(found, c => c.AppId == 7 && c.Kind == ContainerKind.Hidden);
+            Assert.Contains(found, c => c.AppId == 760 && c.Posture == "real"); // not hooked locally
+            Assert.Contains(found, c => c.AppId == 113200 && c.Source == ContainerSource.OstLua);
+            Assert.Contains(found, c => c.AppId == 588650 && c.Kind == ContainerKind.Activation && c.Posture == "redirected");
+            Assert.All(found, c => Assert.True(c.AppId != 0, "no host marker without a toml"));
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AutoCloudedFlagComesFromCallback()
+    {
+        var steam = NewSteam();
+        try
+        {
+            var found = PoolDiscoverer.Discover(steam, autoClouded: id => id == 480);
+            Assert.True(found.First(c => c.AppId == 480).AutoClouded);
+            Assert.False(found.First(c => c.AppId == 7).AutoClouded);
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DiscoversCloudRedirectHostMarker()
+    {
+        var steam = NewSteam();
+        try
+        {
+            File.WriteAllText(Path.Combine(steam, "opensteamtool.toml"), "[cloud]\nenabled = true\nlibrary = \"cloud_redirect.dll\"\n");
+            File.WriteAllText(Path.Combine(steam, "cloud_redirect.dll"), "");
+            var found = PoolDiscoverer.Discover(steam);
+            Assert.Contains(found, c => c.AppId == 0 && c.Source == ContainerSource.OstToml && c.Posture == "provider");
+            Assert.All(found.Where(c => c.AppId != 0), c => Assert.Equal("provider", c.Posture)); // CR loaded = provider everywhere
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DiscoversSteamSettingsAndGreenLuma()
+    {
+        var steam = NewSteam();
+        try
+        {
+            var game = Path.Combine(steam, "steamapps", "common", "SomeGame");
+            Directory.CreateDirectory(Path.Combine(game, "steam_settings"));
+            File.WriteAllText(Path.Combine(game, "steam_settings", "appid.txt"), "3164500");
+            Directory.CreateDirectory(Path.Combine(steam, "GreenLuma_2024_0"));
+            File.WriteAllLines(Path.Combine(steam, "GreenLuma_2024_0", "appidwhitelist.txt"), ["3722330", "1234567"]);
+
+            var found = PoolDiscoverer.Discover(steam);
+            Assert.Contains(found, c => c.AppId == 3164500 && c.Source == ContainerSource.Sls);
+            Assert.Contains(found, c => c.AppId == 3722330 && c.Source == ContainerSource.GreenLuma);
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void MissingSteamDirYieldsOnlyPoolContainers()
+    {
+        var steam = NewSteam();
+        try
+        {
+            var found = PoolDiscoverer.Discover(steam);
+            Assert.All(found, c => Assert.Equal(ContainerSource.PoolDb, c.Source));
+            Assert.Equal(PoolDb.DefaultPool.Count, found.Count);
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
+    }
 }

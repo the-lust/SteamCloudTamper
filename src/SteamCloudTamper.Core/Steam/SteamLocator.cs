@@ -173,9 +173,17 @@ public static class SteamLocator
     /// they are CloudRedirect-local or plain registry entries.
     /// </summary>
     public static bool IsOstRedirected(string steamPath, uint appId)
+        => ListOstHookedAppIds(steamPath).Contains(appId);
+
+    /// <summary>
+    /// Every AppID an OST config/lua/*.lua addappid bundle claims.
+    /// Returns an empty list when the lua dir is missing/unreadable.
+    /// </summary>
+    public static List<uint> ListOstHookedAppIds(string steamPath)
     {
+        var hooked = new List<uint>();
         var luaDir = Path.Combine(steamPath, "config", "lua");
-        if (!Directory.Exists(luaDir)) return false;
+        if (!Directory.Exists(luaDir)) return hooked;
         try
         {
             foreach (var lua in Directory.EnumerateFiles(luaDir, "*.lua"))
@@ -184,19 +192,84 @@ public static class SteamLocator
                 {
                     var t = line.Trim();
                     if (!t.Contains("addappid", StringComparison.OrdinalIgnoreCase)) continue;
-                    // addappid(<appid>) or addappid <appid>
                     var m = System.Text.RegularExpressions.Regex.Match(
                         t, @"addappid\s*[\(\s]\s*([0-9]{3,})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                    if (m.Success && uint.TryParse(m.Groups[1].Value, out var hooked) && hooked == appId)
-                        return true;
+                    if (m.Success && uint.TryParse(m.Groups[1].Value, out var id) && !hooked.Contains(id))
+                        hooked.Add(id);
                 }
             }
         }
         catch
         {
-            return false;
+            // unreadable lua - treat as no hooks
         }
-        return false;
+        return hooked;
+    }
+
+    /// <summary>
+    /// Goldberg/SLS-style emulated entitlement: a steam_settings folder inside a
+    /// common game dir (with an appid.txt). Returns (appId, gameDir) pairs.
+    /// </summary>
+    public static List<(uint AppId, string GameDir)> FindSteamSettings(string steamPath)
+    {
+        var found = new List<(uint, string)>();
+        try
+        {
+            foreach (var lib in ListLibraries(steamPath))
+            {
+                var common = Path.Combine(lib, "common");
+                if (!Directory.Exists(common)) continue;
+                foreach (var gameDir in Directory.EnumerateDirectories(common))
+                {
+                    var settings = Path.Combine(gameDir, "steam_settings");
+                    if (!Directory.Exists(settings)) continue;
+                    var appidFile = Path.Combine(settings, "appid.txt");
+                    if (!File.Exists(appidFile)) continue;
+                    var txt = File.ReadAllText(appidFile).Trim();
+                    if (uint.TryParse(txt, out var appId))
+                        found.Add((appId, gameDir));
+                }
+            }
+        }
+        catch
+        {
+            // unreadable library - nothing found
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// GreenLuma emulated entitlement: appidwhitelist.txt files under a
+    /// GreenLuma_* folder. Returns every listed AppID.
+    /// </summary>
+    public static List<uint> FindGreenLumaAppIds(string steamPath)
+    {
+        var found = new List<uint>();
+        try
+        {
+            var roots = new[] { steamPath, Path.Combine(steamPath, "steamapps") };
+            foreach (var root in roots)
+            {
+                if (!Directory.Exists(root)) continue;
+                foreach (var dir in Directory.EnumerateDirectories(root, "GreenLuma*"))
+                {
+                    foreach (var wl in Directory.EnumerateFiles(dir, "appidwhitelist.txt", SearchOption.AllDirectories))
+                    {
+                        foreach (var line in File.ReadAllLines(wl))
+                        {
+                            var t = line.Trim();
+                            if (uint.TryParse(t, out var id) && !found.Contains(id))
+                                found.Add(id);
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // nothing readable - nothing found
+        }
+        return found;
     }
 
     /// <summary>

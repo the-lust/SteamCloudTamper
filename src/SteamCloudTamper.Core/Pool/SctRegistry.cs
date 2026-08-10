@@ -46,6 +46,19 @@ public sealed class SctRegistry
     /// </summary>
     public Dictionary<uint, string> PoolProbes { get; set; } = [];
 
+    /// <summary>
+    /// Last snapshot of the container universe built by <see cref="PoolDiscoverer"/>
+    /// (owned/free/hidden/tool/activation AppIDs + their posture and AutoClouded state).
+    /// </summary>
+    public List<ContainerInfo> Discovered { get; set; } = [];
+
+    /// <summary>Re-runs discovery and persists the snapshot.</summary>
+    public void SyncDiscovered(string steamPath, Func<uint, bool>? autoClouded = null, string? path = null)
+    {
+        Discovered = PoolDiscoverer.Discover(steamPath, autoClouded);
+        Save(path);
+    }
+
     public static string DefaultPath()
     {
         var env = Environment.GetEnvironmentVariable("SCT_REGISTRY");
