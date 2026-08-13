@@ -11,7 +11,7 @@ pronounced **SCT** like you'd say "sick" if you stubbed your toe.
 
 ```
         ╭──────────────────────────────────────────────╮
-        │   ﾐ☆彡   A C E   ﾐ☆彡                         │
+        │   ﾐ☆彡   A C E   ﾐ☆彡                        │
         │   github.com/AceSLS                          │
         │                                              │
         │   dev rating : ∞/∞   (that's two infinities) │
