@@ -10,15 +10,15 @@ pronounced **SCT** like you'd say "sick" if you stubbed your toe.
 ## 🌸 special thanks: ace (∞/∞, would proxy again) 🌸
 
 ```
-        ╭──────────────────────────────────────────────╮
-        │   ﾐ☆彡   A C E   ﾐ☆彡                        │
-        │   github.com/AceSLS                          │
-        │                                              │
-        │   dev rating : ∞/∞   (that's two infinities) │
-        │   patience   : ≥ a saint                     │
-        │   helpfulness: 11/10, off the charts         │
-        ╰──────────────────────────────────────────────╯
-              ／(・×・)＼  thank you!!  ／(・×・)＼
+         +-------------------------------------------+
+         |             <3  A C E  <3                 |
+         |         github.com/AceSLS                 |
+         |                                           |
+         |  dev rating  : infinity/infinity          |
+         |  patience    : >= a saint                 |
+         |  helpfulness : 11/10, off the charts      |
+         +-------------------------------------------+
+              /( ^ x ^ )\  thank you!!  /( ^ x ^ )\
 ```
 
 (◕‿◕) the appid proxy trick - the one that lets unowned games ride an owned bucket
