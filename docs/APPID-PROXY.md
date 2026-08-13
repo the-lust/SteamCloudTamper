@@ -108,4 +108,11 @@ even for owned buckets, so real proxy parking needs a real session (SCT_USER/
 SCT_PASS or QR). and the april 2025 wall still applies to any unowned appid
 WITHOUT a mapping - the map is the fix, not the exception.
 
-link to the original author's repo when they share it; this note is research only.
+## special thanks
+
+the appid proxy idea (and this whole note) came from **Ace** - [https://github.com/AceSLS](https://github.com/AceSLS) -
+who both wrote the original patch this feature is based on AND patiently answered
+a bazillion questions while we ported it into SCT. she helped a lot. we would
+rate her dev-ing skills infinity/infinity. 10/10 would proxy again.
+
+link the original author's repo: https://github.com/AceSLS
