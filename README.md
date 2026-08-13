@@ -1,4 +1,4 @@
-# SteamCloudTamper
+# <img src="assets/ansi_art.png" alt="SteamCloudTamper" width="460" />
 
 Runs your steam cloud saves though a car wash. Not sure it improved anything, but they
 sure are clean now. And parked. Parked saves! Because Valve told us "you cant upload to
