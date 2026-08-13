@@ -73,4 +73,39 @@ notable bits:
 - appid 7 quirk worth remembering: `isSubscribed(7)` is untrustworthy server-side
   - skip it in any proxy logic too.
 
+## implemented in SCT (2026-08-13)
+
+the same effect WITHOUT the hook, because our rpc lane (SteamKit) writes the
+appid and the filename itself - no steamclient process involved:
+
+- `CloudProxy` (Core): `sls-<game>/` prefix helpers - `Apply`, `TryStrip`,
+  `FilterToGame` (the changelist-filter lesson: foreign namespaces are dropped
+  so one bucket can host many games without cross-downloads).
+- `AppConfig.CloudProxies`: `Dictionary<uint game, uint proxy>`, key 0 = default
+  proxy for ANY unowned game, per-game entries override (the yaml map, minus
+  the yaml). `ResolveProxy(game)` looks up per-game then default then 0.
+- `CloudProxyLane` (Engines): wraps `CloudRpcClient` - enumerate/upload/delete/
+  download/quota all hit the PROXY appid with the `sls-<game>/` prefix applied;
+  callers only ever see logical (stripped) names.
+- `park --proxy <appid>` (or auto via the CloudProxies map): decisions plan
+  into the proxy bucket (must be in the owned set - otherwise AccessDenied),
+  uploads go through the lane, registry slots get posture `"proxied"` with the
+  wire `sls-<game>/` name as StoredName. proxy parking is rpc-only: the client
+  lane uploads through the real Steam client, which checks per-bucket
+  entitlement, proxy or not.
+- `remote-list --app <game> --proxy <bucket>`: lists the game's namespace inside
+  the proxy bucket; auto-resolves from the map when the game is unowned.
+- `unpark` / `wipe`: strip-aware - give them the wire name and they know it is
+  a proxied save, resolve the game, route through the lane, and name the
+  output file like a human.
+- TUI: Settings -> "Proxy appids" (game=proxy pairs, comma-separated).
+- `proxy status | set <game> <proxy> | rm <game> | ls` in the CLI.
+- `pool discover` shows proxy buckets as `Source=Proxy` / posture `"proxied"`
+  containers with the mapped games in the note.
+
+same caveats as the original: anonymous uploads are still denied server-side
+even for owned buckets, so real proxy parking needs a real session (SCT_USER/
+SCT_PASS or QR). and the april 2025 wall still applies to any unowned appid
+WITHOUT a mapping - the map is the fix, not the exception.
+
 link to the original author's repo when they share it; this note is research only.

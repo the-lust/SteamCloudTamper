@@ -66,13 +66,29 @@ public sealed class ParkingEngine
         bool stealth = false,
         int spread = 1,
         int copies = 1,
-        uint? forceBucket = null)
+        uint? forceBucket = null,
+        uint? proxyBucket = null)
     {
         if (_owned.Contains(gameAppId))
-            throw new InvalidOperationException($"appid {gameAppId} is in the owned list - parking an owned game is refused (use Ferry for backups).");
+            throw new InvalidOperationException($"appid {gameAppId} is in the owned list - parking an owned game is refused (use Ferry for backups). Unless you mean to proxy a game you own into a bucket you also own? No. Stop it.");
 
         if (files.Count == 0) return [];
         spread = Math.Max(1, spread);
+
+        if (proxyBucket is { } prox)
+        {
+            // appid proxy (docs/APPID-PROXY.md): the proxy bucket IS the container.
+            // no scoring, no spread, no co-existence games - every file lands there
+            // under the sls-<game>/ namespace, and we refuse a proxy we don't own.
+            if (!_owned.Contains(prox))
+                return files.Select(f => (ParkingDecision)ParkingDecision.Fail(
+                    $"proxy {prox} is not in the owned set - see 'scan'; uploads to it come back AccessDenied")).ToList();
+
+            return files.SelectMany(f => Enumerable.Range(0, copies).Select(copy =>
+                (ParkingDecision)new ParkingDecision(true, prox,
+                    BuildStoredName(gameAppId, f.Name, copy, copies, stealth),
+                    $"proxy bucket {prox}: rides the sls-{gameAppId}/ namespace"))).ToList();
+        }
         copies = Math.Max(1, copies);
 
         var candidates = PoolDb.Usable()

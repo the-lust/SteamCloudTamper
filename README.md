@@ -86,11 +86,18 @@ parking brain (anti-ban: private saves, real apps, never public flooding):
                                auto   = steam up + right account -> client lane; else rpc
                                client = stage local, the signed-in session does the upload
                                         (real UFS or the CR provider, live postures tell us where)
-                               rpc    = SCT logs in itself (env creds or QR) and uploads directly.
-                                        the ONLY real upload for buckets the client never
-                                        AutoClouds itself (lookin at you, 480)
-                               stage  = files local only, the session syncs whenever it feels like it
-                               --bucket pins all files to ONE explicit slot (refuses blocked/denied ones)
+rpc    = SCT logs in itself (env creds or QR) and uploads directly.
+                                         the ONLY real upload for buckets the client never
+                                         AutoClouds itself (lookin at you, 480)
+                                stage  = files local only, the session syncs whenever it feels like it
+                                --bucket pins all files to ONE explicit slot (refuses blocked/denied ones)
+                                --proxy <appid> ride an OWNED bucket instead of the pool: unowned saves
+                                         get parked under a sls-<game>/ namespace inside your own bucket
+                                         (a la Ace SLS, no client hook needed - see APPID-PROXY.md).
+                                         rpc-only. auto-resolves from the CloudProxies map.
+    proxy status | set <game> <proxy> | rm <game> | ls
+                                the appid-proxy map: game -> owned bucket. game 0 = default for
+                                EVERY unowned game without its own entry. lives in the config.
     client status | sync <appid> [--down] | tell <command>
                                client lane: status / force a sync tick / raw console cmd.
                                (the steam console is blocked on modern client builds - we checked,

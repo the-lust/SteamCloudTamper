@@ -39,6 +39,7 @@ public static class Program
                 "unpark" => await UnparkCmd(args, config),
                 "client" => await ClientCmd(args, config),
                 "provider" => ProviderCmd(args, config),
+                "proxy" => await ProxyCmd(args, config),
                 "rebuild" => RebuildCmd(args, config),
                 "barcode" => BarcodeCmd(args, config),
                 _ => Help()
@@ -113,18 +114,35 @@ public static class Program
         var appFilter = Arg(args, "--app");
         if (appFilter is null)
         {
-            Console.WriteLine("usage: remote-list --app <appid>");
+            Console.WriteLine("usage: remote-list --app <appid> [--proxy <appid>]");
             return 1;
         }
 
         var appId = uint.Parse(appFilter);
+        var proxyAppId = Arg(args, "--proxy") is { } px && uint.TryParse(px, out var pv) ? pv
+            : config.ResolveProxy(appId);
+
         await using var s = await ConnectSessionAsync();
-        var rpc = new CloudRpcClient(s);
 
         try
         {
-            var files = await rpc.EnumerateAsync(appId);
-            Console.WriteLine($"{appId}: {files.Count} file(s):");
+            List<CloudFileEntry> files;
+            string headline;
+            if (proxyAppId == 0)
+            {
+                var rpc = new CloudRpcClient(s);
+                files = await rpc.EnumerateAsync(appId);
+                headline = $"{appId}: {files.Count} file(s):";
+            }
+            else
+            {
+                Console.WriteLine($"note: {appId} is not owned here - listing the sls-{appId}/ namespace inside proxy bucket {proxyAppId}");
+                var lane = new CloudProxyLane(new CloudRpcClient(s), appId, proxyAppId);
+                files = await lane.EnumerateAsync();
+                headline = $"{appId} (via proxy {proxyAppId}): {files.Count} file(s):";
+            }
+
+            Console.WriteLine(headline);
             foreach (var f in files)
             {
                 var sha = f.FileSha is { Length: > 0 } fsha ? fsha.Length > 16 ? fsha[..16] + "..." : fsha : "-";
@@ -160,15 +178,88 @@ public static class Program
         return 0;
     }
 
+    private static Task<int> ProxyCmd(string[] args, AppConfig config)
+    {
+        // appid proxy map (docs/APPID-PROXY.md): game -> owned bucket. key 0 is
+        // the catch-all default for every unowned game without its own mapping.
+        var sub = args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+        switch (sub)
+        {
+            case "set":
+            {
+                if (args.Length < 4 || !uint.TryParse(args[2], out var game) || !uint.TryParse(args[3], out var proxy))
+                {
+                    Console.WriteLine("usage: proxy set <gameAppId> <proxyAppId>   (game 0 = default for ALL unowned games; proxy 0 = clear the mapping)");
+                    return Task.FromResult(1);
+                }
+
+                if (proxy == 0)
+                {
+                    config.CloudProxies.Remove(game);
+                    Console.WriteLine($"CloudProxies[{game}] cleared - that game falls through to the default proxy now, if there is one");
+                }
+                else
+                {
+                    if (!config.GetOwnedSet().Contains(proxy))
+                        Console.WriteLine($"WARNING: {proxy} is not in the owned set according to 'scan' - Valve just denies uploads to unowned buckets, so this one is probably on fire before it starts.");
+                    config.CloudProxies[game] = proxy;
+                    Console.WriteLine($"CloudProxies[{game}] = {proxy}");
+                }
+                config.Save(ConfigPath);
+                return Task.FromResult(0);
+            }
+            case "rm":
+            {
+                if (args.Length < 3 || !uint.TryParse(args[2], out var game))
+                {
+                    Console.WriteLine("usage: proxy rm <gameAppId>   (0 = drop the default proxy)");
+                    return Task.FromResult(1);
+                }
+                config.CloudProxies.Remove(game);
+                config.Save(ConfigPath);
+                Console.WriteLine($"CloudProxies[{game}] removed");
+                return Task.FromResult(0);
+            }
+            case "ls":
+            case "status":
+            {
+                if (config.CloudProxies.Count == 0)
+                {
+                    Console.WriteLine("no appid proxies configured - unowned saves stay behind the april 2025 AccessDenied wall. see docs/APPID-PROXY.md");
+                    return Task.FromResult(0);
+                }
+                Console.WriteLine("CloudProxies (game -> proxy bucket):");
+                foreach (var (game, proxy) in config.CloudProxies.OrderBy(k => k.Key))
+                    Console.WriteLine($"  {(game == 0 ? "default" : "game")} {game,10} -> {proxy}");
+                return Task.FromResult(0);
+            }
+            default:
+                Console.WriteLine("usage: proxy status | set <gameAppId> <proxyAppId> | rm <gameAppId> | ls");
+                return Task.FromResult(1);
+        }
+    }
+
     private static async Task<int> Wipe(string[] args, AppConfig config)
     {
         if (args.Length < 3 || !uint.TryParse(args[1], out var appId))
         {
-            Console.WriteLine("usage: wipe <appid> <filename> [--blank] [--force]");
+            Console.WriteLine("usage: wipe <appid> <filename> [--blank] [--force]   (proxied saves: wipe <proxyBucket> sls-<game>/<file>)");
             return 1;
         }
 
         var file = args[2];
+
+        // proxied saves ride in an owned bucket under a sls-<game>/ prefix; strip it
+        // and go back through the proxy lane so the prefix lands on exactly once.
+        uint? proxyFor = null;
+        if (CloudProxy.TryStrip(file, out var proxiedGame, out var stripped) && config.ResolveProxy(proxiedGame) is var prox && prox != 0)
+        {
+            Console.WriteLine($"note: {file} is a proxied save of game {proxiedGame} -> wiping in proxy bucket {prox}");
+            appId = prox;
+            file = stripped;
+            proxyFor = proxiedGame;
+        }
+
         var blank = Has(args, "--blank");
         var dryRun = !Has(args, "--force") && config.DryRun;
         if (dryRun) Console.WriteLine("DRY-RUN (--force to execute)");
@@ -177,7 +268,9 @@ public static class Program
         await using var session = await ConnectSessionAsync();
         var rpc = new CloudRpcClient(session);
         var engine = new WipeEngine(config);
-        var outcome = await engine.WipeAsync(rpc, appId, file, blank);
+        var outcome = proxyFor is { } g
+            ? await engine.WipeAsync(new CloudProxyLane(rpc, g, appId), file, blank)
+            : await engine.WipeAsync(rpc, appId, file, blank);
 
         Console.WriteLine($"{(outcome.Success ? "OK  " : "FAIL")} [{outcome.Action}] {outcome.AppId}/{outcome.FileName}: {outcome.Result}");
         return outcome.Success ? 0 : 1;
@@ -905,7 +998,7 @@ await using var session = await ConnectSessionAsync();
         }
         else
         {
-            Console.WriteLine("usage: park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>] [--spread N] [--copies N] [--stealth] [--wait-sec N]");
+            Console.WriteLine("usage: park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>] [--proxy <appid>] [--spread N] [--copies N] [--stealth] [--wait-sec N]");
             return 1;
         }
 
@@ -981,10 +1074,28 @@ await using var session = await ConnectSessionAsync();
             }
         }
 
+        // ---- appid proxy (docs/APPID-PROXY.md) ----
+        // unowned games can't park in pool buckets they don't own (the whole april
+        // 2025 wall) - instead they ride an OWNED bucket under sls-<game>/ prefixes.
+        // --proxy picks the bucket; otherwise CloudProxies map auto-resolves.
+        var proxyAppId = Arg(args, "--proxy") is { } px && uint.TryParse(px, out var pvx) ? pvx
+            : config.ResolveProxy(gameAppId);
+        var proxied = proxyAppId != 0;
+        if (proxied && (lane == "client" || lane == "auto"))
+        {
+            Console.WriteLine($"proxy parking ({gameAppId} -> {proxyAppId}) is rpc-only: the client lane uploads through the real Steam client, which still checks per-bucket entitlement - switching to --lane rpc");
+            lane = "rpc";
+        }
+        if (proxied && !config.GetOwnedSet().Contains(proxyAppId))
+        {
+            Console.WriteLine($"proxy {proxyAppId} is not in the owned set - see 'scan'; uploads to it come back AccessDenied");
+            return 1;
+        }
+
         uint? bucket = Arg(args, "--bucket") is { } bk && uint.TryParse(bk, out var b) ? b : null;
         var today = DateOnly.FromDateTime(DateTime.Now);
         var decisions = engine.Plan(gameAppId, files.Select(f => new ParkFile(f.Name, f.Length)).ToList(),
-            stealth, spread, copies, forceBucket: bucket);
+            stealth, spread, copies, forceBucket: bucket, proxyBucket: proxied ? proxyAppId : null);
 
         var plans = new List<(string FileName, ParkingDecision D, byte[] Tagged)>();
         var di = 0;
@@ -1021,7 +1132,10 @@ await using var session = await ConnectSessionAsync();
         }
 
         foreach (var p in plans)
-            Console.WriteLine($"  {p.FileName} -> {p.D.StoredName} @ {p.D.StorageAppId}  [{p.D.Reason}]");
+        {
+            var shown = p.D.StoredName is null ? "?" : proxied ? CloudProxy.Apply(gameAppId, p.D.StoredName) : p.D.StoredName;
+            Console.WriteLine($"  {p.FileName} -> {shown} @ {p.D.StorageAppId}  [{p.D.Reason}]");
+        }
 
         if (dry)
         {
@@ -1064,18 +1178,22 @@ await using var session = await ConnectSessionAsync();
         // ---- RPC lane: logon-based upload (QR / credentials / anonymous) ----
         await using var session = await ConnectSessionAsync();
         var rpc = new CloudRpcClient(session);
+        var proxyLane = proxied ? new CloudProxyLane(rpc, gameAppId, proxyAppId) : null;
         var okCount = 0;
         foreach (var p in plans)
         {
-            var res = await rpc.UploadAsync(p.D.StorageAppId!.Value, p.D.StoredName!, p.Tagged);
+            var res = proxyLane is null
+                ? await rpc.UploadAsync(p.D.StorageAppId!.Value, p.D.StoredName!, p.Tagged)
+                : await proxyLane.UploadAsync(p.D.StoredName!, p.Tagged);
             if (res == SteamKit2.EResult.OK)
             {
                 var payloadBarcode = $"{gameAppId}{Barcode.Sep}{uid}{Barcode.Sep}{today:ddMMyyyy}";
-                registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, p.D.StoredName!, p.FileName, p.Tagged.Length, payloadBarcode)
-                    .WithPosture("real"));
+                var wireName = proxied ? CloudProxy.Apply(gameAppId, p.D.StoredName!) : p.D.StoredName!;
+                registry.Upsert(GameSlot.New(gameAppId, p.D.StorageAppId!.Value, wireName, p.FileName, p.Tagged.Length, payloadBarcode)
+                    .WithPosture(proxied ? "proxied" : "real"));
                 okCount++;
             }
-            Console.WriteLine($"  {p.FileName}: {res} -> {p.D.StoredName} @ {p.D.StorageAppId}");
+            Console.WriteLine($"  {p.FileName}: {res} -> {(proxied ? CloudProxy.Apply(gameAppId, p.D.StoredName!) : p.D.StoredName)} @ {p.D.StorageAppId}");
         }
         registry.Save();
         Console.WriteLine($"{okCount}/{plans.Count} parked; registry updated");
@@ -1187,6 +1305,16 @@ await using var session = await ConnectSessionAsync();
         }
 
         var name = args[2];
+
+        // proxied saves come off the wire as sls-<game>/<name>; the registry knows
+        // them by that prefixed name, but the file on disk should get its real name.
+        var displayName = name;
+        if (CloudProxy.TryStrip(name, out var proxiedGame, out var stripped))
+        {
+            Console.WriteLine($"note: proxied save of game {proxiedGame} - will store as {stripped}");
+            displayName = stripped;
+        }
+
         await using var session = await ConnectSessionAsync();
         var rpc = new CloudRpcClient(session);
 
@@ -1215,7 +1343,7 @@ await using var session = await ConnectSessionAsync();
         var registry = SctRegistry.Load();
         var slot = registry.FindByStoredName(storageAppId, name);
         var (src, orig) = Ferry.UnparkName(name);
-        var outFile = Path.Combine(outDir, src == 0 ? name : orig);
+        var outFile = Path.Combine(outDir, src == 0 ? displayName : orig);
         if (slot is { OriginalName.Length: > 0 } && Path.GetFileName(outFile) != slot.OriginalName)
             outFile = Path.Combine(outDir, slot.OriginalName);
         await File.WriteAllBytesAsync(outFile, clean);
@@ -1315,7 +1443,7 @@ await using var session = await ConnectSessionAsync();
 
             detect                    locate Steam + accounts + libraries
             scan                      audit local userdata buckets (per account/app)
-            remote-list --app <id>    list files in a cloud bucket
+            remote-list --app <id> [--proxy <appid>]   list files in a cloud bucket (proxy = list the game's sls-<id>/ namespace inside the proxy bucket)
             probe <appid...>          check what Valve allows: enumerate / upload / delete
             wipe <appid> <file> [--blank] [--force]      delete or blank one cloud file
             wipe-all <appid> [--blank] [--force]          wipe entire bucket
@@ -1336,6 +1464,11 @@ await using var session = await ConnectSessionAsync();
                 pool discover [--net] = sweep machine for container AppIDs (PoolDb + userdata +
                                       OST lua hooks + CloudRedirect host + SLS/GreenLuma) and save
                                       the snapshot to the registry; --net flags AutoClouded from cloud_log
+                appid proxy (unowned saves ride an OWNED bucket under sls-<game>/ prefixes,
+                                      no client hook needed - the rpc lane writes the proxy appid itself):
+                proxy status | set <game> <proxy> | rm <game> | ls
+                                      map game -> owned proxy bucket; game 0 = default for all unowned
+                park <gameAppId> [--proxy <appid>] ...   proxy parking is rpc-only (--lane auto falls back)
                 park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>]
                      [--spread N] [--copies N] [--stealth] [--wait-sec N]
                                       auto   = Steam up + account active -> client; else rpc

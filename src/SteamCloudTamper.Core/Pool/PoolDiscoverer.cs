@@ -11,6 +11,7 @@ public enum ContainerSource
     OstToml,
     Sls,        // Goldberg-style steam_settings (SLS = "Steam Language Selector" convention, same config dir)
     GreenLuma,
+    Proxy,      // appid proxy container (SCT CloudProxies map)
 }
 
 /// <summary>What the account's relationship to this container is.</summary>
@@ -56,7 +57,8 @@ public static class PoolDiscoverer
     /// </summary>
     public static List<ContainerInfo> Discover(
         string steamPath,
-        Func<uint, bool>? autoClouded = null)
+        Func<uint, bool>? autoClouded = null,
+        IReadOnlyDictionary<uint, uint>? proxies = null)
     {
         var byApp = new Dictionary<uint, ContainerInfo>();
 
@@ -157,6 +159,32 @@ public static class PoolDiscoverer
                 appId, null, ContainerKind.Activation, ContainerSource.GreenLuma,
                 "redirected", autoClouded?.Invoke(appId) ?? false,
                 "GreenLuma whitelist - emulated entitlement"));
+        }
+
+        // ---- AppID proxy containers (CloudProxies map) -----------------------
+        if (proxies is { Count: > 0 })
+        {
+            var proxyNames = new Dictionary<uint, List<uint>>();
+            foreach (var (game, proxyAppId) in proxies)
+            {
+                if (game == 0) continue; // default proxy is not a container of its own
+                if (!proxyNames.TryGetValue(proxyAppId, out var games))
+                    proxyNames[proxyAppId] = games = [];
+                games.Add(game);
+            }
+            foreach (var (proxyAppId, games) in proxyNames)
+            {
+                var pool = PoolDb.Find(proxyAppId);
+                var kind = pool is null ? ContainerKind.Owned : pool.Tier == SlotTier.HiddenDev ? ContainerKind.Hidden
+                    : pool.Tier == SlotTier.OwnedReserved ? ContainerKind.Owned
+                    : pool.Category == "ModHost" ? ContainerKind.ModHost : ContainerKind.Free;
+                Add(new ContainerInfo(
+                    proxyAppId,
+                    pool?.Name ?? "proxy container",
+                    kind, ContainerSource.Proxy, "proxied",
+                    autoClouded?.Invoke(proxyAppId) ?? false,
+                    $"appid proxy for: {string.Join(", ", games)}"));
+            }
         }
 
         return [.. byApp.Values

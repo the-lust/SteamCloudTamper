@@ -784,7 +784,7 @@ public static class Program
     {
         var sub = AnsiConsole.Prompt(new SelectionPrompt<string>()
             .Title(TuiFx.Title("Settings"))
-            .AddChoices("Toggle dry-run/live", "Steam path", "Owned appids", "Back"));
+            .AddChoices("Toggle dry-run/live", "Steam path", "Owned appids", "Proxy appids", "Back"));
         switch (sub)
         {
             case "Toggle dry-run/live":
@@ -813,6 +813,29 @@ public static class Program
                 catch { AnsiConsole.MarkupLine("[red]unparseable - unchanged[/]"); break; }
                 _cfg.Save(ConfigPath);
                 RefreshLocal();
+                break;
+            }
+            case "Proxy appids":
+            {
+                // appid proxy map: "gameAppId=proxyAppId" pairs, comma-separated;
+                // game 0 = default proxy bucket for every unowned game (docs/APPID-PROXY.md)
+                var joined = string.Join(", ", _cfg.CloudProxies.OrderBy(k => k.Key).Select(k => $"{k.Key}={k.Value}"));
+                var input = AnsiConsole.Ask("game=proxy pairs (0 = default proxy for all unowned):", joined);
+                try
+                {
+                    var next = new Dictionary<uint, uint>();
+                    foreach (var pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        var bits = pair.Split('=', StringSplitOptions.TrimEntries);
+                        if (bits.Length != 2 || !uint.TryParse(bits[0], out var game) || !uint.TryParse(bits[1], out var proxy))
+                            throw new FormatException(pair);
+                        next[game] = proxy;
+                    }
+                    _cfg.CloudProxies = next;
+                }
+                catch { AnsiConsole.MarkupLine("[red]unparseable - unchanged[/]"); break; }
+                _cfg.Save(ConfigPath);
+                AnsiConsole.MarkupLine($"[green]{_cfg.CloudProxies.Count} proxy mapping(s) saved[/]");
                 break;
             }
         }

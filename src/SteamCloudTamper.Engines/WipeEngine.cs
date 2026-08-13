@@ -40,6 +40,40 @@ public sealed class WipeEngine(AppConfig config)
         return new WipeOutcome(appId.ToString(), fileName, "delete", eresult.ToString(), ok);
     }
 
+    public async Task<WipeOutcome> WipeAsync(
+        CloudProxyLane lane,
+        string fileName,
+        bool blankInsteadOfDelete,
+        byte[]? blankTemplate = null,
+        CancellationToken ct = default)
+    {
+        var wireName = CloudProxy.Apply(lane.GameAppId, fileName);
+        var forced = Environment.GetEnvironmentVariable("SCT_FORCE")?.Equals("1", StringComparison.OrdinalIgnoreCase) == true;
+        if (config.DryRun && !forced)
+        {
+            var dry = blankInsteadOfDelete ? "blank" : "delete";
+            Log?.Invoke($"[dry-run] {lane.ProxyAppId}/{wireName}: would {dry}");
+            return new WipeOutcome(lane.ProxyAppId.ToString(), wireName, dry, "dry-run (no-op)", true);
+        }
+
+        if (blankInsteadOfDelete)
+        {
+            var data = BlankSaveKit.CreateBlank(fileName, blankTemplate);
+            var res = await lane.UploadAsync(fileName, data, ct);
+            Log?.Invoke($"[{lane.ProxyAppId}/{wireName}] blank overwrite -> {res}");
+            return new WipeOutcome(lane.ProxyAppId.ToString(), wireName, "blank", res.ToString(), res == SteamKit2.EResult.OK);
+        }
+
+        var (ok, eresult) = await lane.DeleteAsync(fileName, ct);
+        Log?.Invoke($"[{lane.ProxyAppId}/{wireName}] delete -> {eresult}");
+        if (ok)
+        {
+            config.GuardedAppIds.Add(lane.ProxyAppId);
+        }
+
+        return new WipeOutcome(lane.ProxyAppId.ToString(), wireName, "delete", eresult.ToString(), ok);
+    }
+
     public async Task<List<WipeOutcome>> RunPlanAsync(
         CloudRpcClient rpc,
         IEnumerable<WipeTarget> targets,

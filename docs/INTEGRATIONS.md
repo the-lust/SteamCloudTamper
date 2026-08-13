@@ -7,7 +7,7 @@ projects' docs, so blame them if something drifts.
 
 | Tool | Lane | Status |
 |---|---|---|
-| **SCT CLI/TUI** | native | full (pool, park, ferry, barcode, registry, wipe, web) |
+| **SCT CLI/TUI** | native | full (pool, park, ferry, barcode, registry, wipe, web, proxy) |
 | **SCT client lane** | running Steam session (no login): stage locally + `CloudLogWatcher` verdict; AutoCloud tick only (Steam Console blocked on newer builds); non-AutoCloud buckets (480/113200) need `--lane rpc` for real uploads | full |
 | **SCT posture tracker** | per-slot `real` / `provider` / `redirected` / `local` in registry.json, derived live by `SteamLocator.SyncPosture()` (OST lua hook, CR toml/dll, else Valve) | full |
 
@@ -17,7 +17,8 @@ projects' docs, so blame them if something drifts.
 | **CloudRedirect** | provider engine: local-folder provider (`%AppData%\CloudRedirect\config.json` → `D:\sct_provider`) answers Cloud.* RPCs locally (127.0.0.1), so the Steam GUI shows "synced" for every `addappid()` game — no UFS uploads ever | shipped (v2.6.4) |
 | **SteamTools / SLS / GreenLuma** | same family: integrate the parking brain or ship SteamCloudSave.dll | code to copy (Core/Pool) |
 
-| **Ace SLS appId proxy** | in-process `CClientUnifiedServiceTransport` hook rewrites `Cloud.*` calls for unowned apps into an owned proxy appid + `sls-<appid>/` filename namespacing (valid changelist for unowned games, verified by author 2026-08). same family as SCT's parking, lives client-side instead of outside. research + lessons in `APPID-PROXY.md` | code to copy (research) |
+| **SCT appid proxy lane** | rpc lane with the `sls-<game>/` namespacing: unowned saves park inside an OWNED proxy bucket (CloudProxies map in config; `park --proxy`, `proxy` command, TUI Settings). no hook - SteamKit writes the proxy appid + prefixed name itself; `remote-list`/`unpark`/`wipe` are proxy-aware; `pool discover` shows proxy buckets as posture `proxied` | full (implemented 2026-08-13) |
+| **Ace SLS appId proxy** | in-process `CClientUnifiedServiceTransport` hook rewrites `Cloud.*` calls for unowned apps into an owned proxy appid + `sls-<appid>/` filename namespacing (valid changelist for unowned games, verified by author 2026-08). the same idea SCT now does via its rpc lane - this hook is the client-side version (OST/CR-family host). research + lessons in `APPID-PROXY.md` | implemented in SCT (rpc lane); hook itself code to copy (host) |
 | **online-fix.me** | their cracked steam_api64.dll is a steamclient-side shim; SteamCloudSave.dll can be load-listed or its exports copied | doc only |
 | **Millennium (SteamClientHomebrew)** | plugins are **JS/CSS for the Steam CEF UI**, not native DLLs — SCT integrates at the data layer (registry.json read by a tiny plugin) or via the `SteamCloudSave.dll` lanes; there is no native plugin slot | doc only |
 | **SteamRE / SteamDatabase** | knowledge base feeding pool curation + docs | doc only |

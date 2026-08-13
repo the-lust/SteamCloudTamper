@@ -451,3 +451,104 @@ public class PoolDiscovererTests
         }
     }
 }
+
+public class CloudProxyTests
+{
+    [Fact]
+    public void ApplyThenTryStripRoundTrips()
+    {
+        var wire = CloudProxy.Apply(113200, "save.sav");
+        Assert.Equal("sls-113200/save.sav", wire);
+        Assert.True(CloudProxy.TryStrip(wire, out var game, out var stripped));
+        Assert.Equal(113200u, game);
+        Assert.Equal("save.sav", stripped);
+    }
+
+    [Fact]
+    public void TryStripRejectsUnprefixedOrMalformedNames()
+    {
+        Assert.False(CloudProxy.TryStrip("save.sav", out _, out _));
+        Assert.False(CloudProxy.TryStrip("sls-/save.sav", out _, out _));
+        Assert.False(CloudProxy.TryStrip("sls-abc/save.sav", out _, out _));
+        Assert.False(CloudProxy.TryStrip("sls-113200", out _, out _));
+    }
+
+    [Fact]
+    public void FilterToGameDropsForeignNamespaces()
+    {
+        var all = new[] { "sls-113200/a", "sls-91330/b", "sls-113200/c", "plain.txt" };
+        var mine = CloudProxy.FilterToGame(all, 113200, n => n, (n, s) => s).ToList();
+        Assert.Equal(["a", "c"], mine);
+    }
+
+    [Fact]
+    public void ResolveProxyPrefersPerGameThenDefaultThenNone()
+    {
+        var cfg = new AppConfig { CloudProxies = { [0] = 480, [113200] = 588650 } };
+        Assert.Equal(588650u, cfg.ResolveProxy(113200));
+        Assert.Equal(480u, cfg.ResolveProxy(91330)); // no own mapping -> default proxy
+        Assert.Equal(0u, new AppConfig().ResolveProxy(113200)); // no map at all
+    }
+
+    [Fact]
+    public void CloudProxiesSurviveConfigRoundTrip()
+    {
+        var cfg = new AppConfig { CloudProxies = { [0] = 480, [113200] = 588650 } };
+        var path = Path.Combine(Path.GetTempPath(), $"sct_cfg_{Guid.NewGuid():N}.json");
+        try
+        {
+            cfg.Save(path);
+            var loaded = AppConfig.Load(path);
+            Assert.Equal(480u, loaded.CloudProxies[0]);
+            Assert.Equal(588650u, loaded.CloudProxies[113200]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+}
+
+public class ProxyParkingTests
+{
+    [Fact]
+    public void ProxyBucketParksEveryFileIntoOwnedProxy()
+    {
+        var engine = new ParkingEngine(new HashSet<uint> { 480 }, []);
+        var d = engine.Plan(113200, [new ParkFile("save.sav", 2048)], proxyBucket: 480);
+        Assert.Single(d);
+        Assert.True(d[0].Ok);
+        Assert.Equal(480u, d[0].StorageAppId);
+        Assert.Equal("113200_save.sav", d[0].StoredName);
+    }
+
+    [Fact]
+    public void ProxyBucketRefusedWhenProxyNotOwned()
+    {
+        var engine = new ParkingEngine([], []);
+        var d = engine.Plan(113200, [new ParkFile("save.sav", 2048)], proxyBucket: 480);
+        Assert.False(d[0].Ok);
+        Assert.Contains("owned", d[0].Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DiscoverEmitsProxyContainerRows()
+    {
+        var steam = Path.Combine(Path.GetTempPath(), $"sct_steam_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(steam);
+        try
+        {
+            var found = PoolDiscoverer.Discover(steam,
+                proxies: new Dictionary<uint, uint> { [113200] = 480, [91330] = 480, [0] = 480 });
+            var row = found.First(c => c.AppId == 480);
+            Assert.Equal(ContainerSource.Proxy, row.Source);
+            Assert.Equal("proxied", row.Posture);
+            Assert.Contains("113200", row.Note);
+            Assert.Contains("91330", row.Note);
+        }
+        finally
+        {
+            Directory.Delete(steam, recursive: true);
+        }
+    }
+}
