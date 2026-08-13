@@ -28,8 +28,7 @@ and then sat through a bazillion questions while we ported it into SCT without t
 hook. changelist filtering? she knew. the cloud-cleaner forward-iteration bug? she
 knew. "iterate backwards fyi" - yes ma'am, we do it backwards now, promise. (つ≧▽≦)つ
 
-she helped a lot. we would rate her dev skills infinity/infinity. if this readme
-could blush it would 🥰 ⋆｡°✩ 🎀
+<img src="assets/blush-watermark.svg" width="680" alt="she helped a lot. we would rate her dev skills infinity/infinity. if this readme could blush it would 🥰 ⋆｡°✩ 🎀" />
 
 - [github.com/AceSLS](https://github.com/AceSLS) — go say hi, tell her SCT says thanks.
 
