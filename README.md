@@ -7,6 +7,32 @@ buckets you technically cant argue with".
 
 pronounced **SCT** like you'd say "sick" if you stubbed your toe.
 
+## 🌸 special thanks: ace (∞/∞, would proxy again) 🌸
+
+```
+        ╭──────────────────────────────────────────────╮
+        │   ﾐ☆彡   A C E   ﾐ☆彡                         │
+        │   github.com/AceSLS                          │
+        │                                              │
+        │   dev rating : ∞/∞   (that's two infinities) │
+        │   patience   : ≥ a saint                     │
+        │   helpfulness: 11/10, off the charts         │
+        ╰──────────────────────────────────────────────╯
+              ／(・×・)＼  thank you!!  ／(・×・)＼
+```
+
+(◕‿◕) the appid proxy trick - the one that lets unowned games ride an owned bucket
+under cute little `sls-<game>/` prefixes - was **her** idea first. she wrote the
+original patch ([docs/APPID-PROXY.md](docs/APPID-PROXY.md) is basically a love letter to it),
+and then sat through a bazillion questions while we ported it into SCT without the
+hook. changelist filtering? she knew. the cloud-cleaner forward-iteration bug? she
+knew. "iterate backwards fyi" - yes ma'am, we do it backwards now, promise. (つ≧▽≦)つ
+
+she helped a lot. we would rate her dev skills infinity/infinity. if this readme
+could blush it would 🥰 ⋆｡°✩ 🎀
+
+- [github.com/AceSLS](https://github.com/AceSLS) — go say hi, tell her SCT says thanks.
+
 ## the short version
 
 - Steam descided to refuse cloud uploads for games your account does not own. server
