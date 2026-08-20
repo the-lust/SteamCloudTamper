@@ -358,9 +358,28 @@ public static class Program
         var spread = files.Count > 1 ? Math.Max(1, AnsiConsole.Ask("spread across N slots (1 = all in one):", 3)) : 1;
         var stealth = files.Count > 0 && AnsiConsole.Confirm("hashed stealth names?", false);
 
+        // container universe + consent for owned-game buckets (never auto-picked)
+        var containers = PoolDiscoverer.Discover(_steamPath, proxies: _cfg.CloudProxies);
+        var ownedContainers = containers.Count(c => c.Kind == ContainerKind.Owned);
+        var allowOwned = ownedContainers > 0 &&
+            AnsiConsole.Confirm($"{ownedContainers} owned game bucket(s) detected - include them? (OPT-IN consent)", false);
+        if (ownedContainers > 0 && !allowOwned)
+            AnsiConsole.MarkupLine("[dim]owned buckets excluded - they are never picked without consent[/]");
+
+        HashSet<string>? postureFilter = null;
+        var postures = containers.Select(c => c.Posture).Where(p => p.Length > 0).Distinct().OrderBy(p => p).ToList();
+        var postureLabels = new List<string> { "any (no filter)" };
+        postureLabels.AddRange(postures.Select(p => $"{(p == "real" ? "real - Valve UFS" : p == "provider" ? "provider - CloudRedirect folder" : p == "redirected" ? "redirected - activation tool (OST/SLS/GL)" : p)}".ToLowerInvariant()));
+        var posturePick = AnsiConsole.Prompt(new SelectionPrompt<string>()
+            .Title(TuiFx.Title("Posture filter (ranking: VerifiedWritable real > AutoClouded real > probe-candidate > provider/redirected)"))
+            .AddChoices(postureLabels));
+        if (posturePick != "any (no filter)")
+            postureFilter = [posturePick.Split(" - ")[0]];
+
         var engine = new ParkingEngine(_cfg.GetOwnedSet(), _registry.Slots, poolProbes: _registry.PoolProbes);
         var decisions = engine.Plan(gameAppId,
-            files.Select(f => new ParkFile(f.FileName, f.FileSize)).ToList(), stealth, spread, 1);
+            files.Select(f => new ParkFile(f.FileName, f.FileSize)).ToList(), stealth, spread, 1,
+            containers: containers, allowOwned: allowOwned, postureFilter: postureFilter);
 
         var plans = new List<(Bucket Origin, CloudFileEntry F, ParkingDecision D, byte[] Tagged)>();
         var di = 0;

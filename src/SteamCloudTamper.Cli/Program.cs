@@ -590,7 +590,7 @@ await using var session = await ConnectSessionAsync();
         {
             case "list":
             {
-                Console.WriteLine("Parking pool (owned-game buckets are NEVER selected):");
+                Console.WriteLine("Parking pool (owned-game buckets need --allow-owned consent):");
                 var reg = SctRegistry.Load();
                 foreach (var p in PoolDb.DefaultPool
                              .OrderBy(p => p.Tier).ThenBy(p => p.AppId))
@@ -998,10 +998,12 @@ await using var session = await ConnectSessionAsync();
         }
         else
         {
-            Console.WriteLine("usage: park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>] [--proxy <appid>] [--spread N] [--copies N] [--stealth] [--wait-sec N]");
+            Console.WriteLine("usage: park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>] [--proxy <appid>] [--spread N] [--copies N] [--stealth] [--wait-sec N] [--allow-owned] [--posture real,provider,redirected|any]");
             return 1;
         }
 
+        var allowOwned = Has(args, "--allow-owned");
+        var postureFilter = ParsePostureFilter(Arg(args, "--posture"));
         var stealth = Has(args, "--stealth");
         var spread = Arg(args, "--spread") is { } sp && int.TryParse(sp, out var s) ? Math.Max(1, s) : 1;
         var copies = Arg(args, "--copies") is { } cp && int.TryParse(cp, out var c) ? Math.Max(1, c) : 1;
@@ -1025,9 +1027,6 @@ await using var session = await ConnectSessionAsync();
             Console.WriteLine("bucket is empty (nothing to park)");
             return 0;
         }
-
-        var engine = new ParkingEngine(config.GetOwnedSet(), registry.Slots, poolProbes: registry.PoolProbes);
-        Console.WriteLine($"{gameAppId}: {files.Count} file(s) to park | spread={spread} copies={copies} stealth={stealth} | owned-set {config.GetOwnedSet().Count} | uid {uid}");
 
         // ---- lane matrix ----
         //   auto   : Steam up + this account active -> client; otherwise explain the options
@@ -1094,8 +1093,21 @@ await using var session = await ConnectSessionAsync();
 
         uint? bucket = Arg(args, "--bucket") is { } bk && uint.TryParse(bk, out var b) ? b : null;
         var today = DateOnly.FromDateTime(DateTime.Now);
+
+        // container universe from this machine (owned userdata buckets, activation
+        // hooks, CR host) - the allocator consults it for owned buckets + posture
+        var containers = PoolDiscoverer.Discover(steam, proxies: config.CloudProxies);
+        var ownedContainers = containers.Count(c => c.Kind == ContainerKind.Owned);
+        if (ownedContainers > 0 && !allowOwned)
+            Console.WriteLine($"note: {ownedContainers} owned game bucket(s) found but excluded - pass --allow-owned to opt in");
+        if (postureFilter is not null)
+            Console.WriteLine($"note: --posture {string.Join(",", postureFilter)} filters the candidate universe");
+
+        var engine = new ParkingEngine(config.GetOwnedSet(), registry.Slots, poolProbes: registry.PoolProbes);
+        Console.WriteLine($"{gameAppId}: {files.Count} file(s) to park | spread={spread} copies={copies} stealth={stealth} | owned-set {config.GetOwnedSet().Count} | uid {uid}");
         var decisions = engine.Plan(gameAppId, files.Select(f => new ParkFile(f.Name, f.Length)).ToList(),
-            stealth, spread, copies, forceBucket: bucket, proxyBucket: proxied ? proxyAppId : null);
+            stealth, spread, copies, forceBucket: bucket, proxyBucket: proxied ? proxyAppId : null,
+            containers: containers, allowOwned: allowOwned, postureFilter: postureFilter);
 
         var plans = new List<(string FileName, ParkingDecision D, byte[] Tagged)>();
         var di = 0;
@@ -1430,6 +1442,17 @@ await using var session = await ConnectSessionAsync();
 
     private static bool Has(string[] args, string name) => args.Contains(name);
 
+    /// <summary>--posture real,provider,redirected | any -> explicit filter set; null = no filter.</summary>
+    private static HashSet<string>? ParsePostureFilter(string? raw)
+    {
+        if (raw is null) return null;
+        var parts = raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(p => p.ToLowerInvariant())
+            .ToHashSet();
+        if (parts.Count == 0 || parts.Contains("any")) return null;
+        return parts;
+    }
+
     private static uint ResolveUid(string[] args, AppConfig config, string steam)
     {
         if (Arg(args, "--uid") is { } u && uint.TryParse(u, out var id)) return id;
@@ -1471,11 +1494,16 @@ await using var session = await ConnectSessionAsync();
                 park <gameAppId> [--proxy <appid>] ...   proxy parking is rpc-only (--lane auto falls back)
                 park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>]
                      [--spread N] [--copies N] [--stealth] [--wait-sec N]
+                     [--allow-owned] [--posture real,provider,redirected|any]
                                       auto   = Steam up + account active -> client; else rpc
                                       client = stage locally + console cloud_sync_up (official client uploads;
                                                real UFS or CR provider per app posture; no SCT login)
                                       rpc    = SCT logs on (QR/creds) and uploads directly
                                       stage  = drop files locally only; session syncs on its own later
+                                      --allow-owned = OPT-IN consent for owned-game buckets (never auto-picked
+                                               without it); --posture filters the candidate universe by posture
+                                      (default ranking: VerifiedWritable real > AutoClouded real > probe-candidate
+                                               > provider/redirected; activation containers only once real slots run out)
                 client status | sync <appid> [--down] | tell <command>
                                       console lane: force real sync of one bucket via the running client
                 provider status | init [sync-dir] | ls [--uid <id3>] [--app <appid>]

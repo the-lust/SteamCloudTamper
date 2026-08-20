@@ -106,20 +106,30 @@ parking brain (anti-ban: private saves, real apps, never public flooding):
     pool probe [--uid <id3>] [--force] [--wait-sec N]
                                one private file, let the RUNNING steam client sync it, read the verdict
                                from cloud_log. verdicts go to the registry. nobody logs in. its neat.
-    park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>]
+park <gameAppId> [--uid <id3>] [--force] [--lane auto|client|rpc|stage] [--bucket <appid>]
          [--spread N] [--copies N] [--stealth] [--wait-sec N]
+         [--allow-owned] [--posture real,provider,redirected|any]
                                auto   = steam up + right account -> client lane; else rpc
                                client = stage local, the signed-in session does the upload
                                         (real UFS or the CR provider, live postures tell us where)
-rpc    = SCT logs in itself (env creds or QR) and uploads directly.
-                                         the ONLY real upload for buckets the client never
-                                         AutoClouds itself (lookin at you, 480)
-                                stage  = files local only, the session syncs whenever it feels like it
-                                --bucket pins all files to ONE explicit slot (refuses blocked/denied ones)
-                                --proxy <appid> ride an OWNED bucket instead of the pool: unowned saves
-                                         get parked under a sls-<game>/ namespace inside your own bucket
-                                         (a la Ace SLS, no client hook needed - see APPID-PROXY.md).
-                                         rpc-only. auto-resolves from the CloudProxies map.
+                               rpc    = SCT logs in itself (env creds or QR) and uploads directly.
+                                        the ONLY real upload for buckets the client never
+                                        AutoClouds itself (lookin at you, 480)
+                               stage  = files local only, the session syncs whenever it feels like it
+                               --bucket pins all files to ONE explicit slot (refuses blocked/denied ones)
+                               --allow-owned = OPT-IN consent: owned-game buckets (real userdata
+                                        containers + OwnedReserved pool tiers) join the universe.
+                                        NEVER auto-picked without it.
+                               --posture filters the candidate universe: real / provider /
+                                        redirected, comma-separated ('any' = no filter).
+                                        default ranking: VerifiedWritable real > AutoClouded real >
+                                        probe-candidate > provider/redirected; activation-tool
+                                        containers (OST lua / SLS / GreenLuma) only fill in once
+                                        real slots run out
+                               --proxy <appid> ride an OWNED bucket instead of the pool: unowned saves
+                                        get parked under a sls-<game>/ namespace inside your own bucket
+                                        (a la Ace SLS, no client hook needed - see APPID-PROXY.md).
+                                        rpc-only. auto-resolves from the CloudProxies map.
     proxy status | set <game> <proxy> | rm <game> | ls
                                 the appid-proxy map: game -> owned bucket. game 0 = default for
                                 EVERY unowned game without its own entry. lives in the config.
@@ -158,8 +168,11 @@ parked saves get a trailer glued to their ass: `SCTB1` magic + crc32 + payload
 
 ## parking allocator rules (in order)
 
-1. hidden/dev apps, valve tools, mod hosts > old free games. owned-game buckets are tier 3 and marked
-   "NEVER" until the user explicitly says otherwise (there is no "otherwise" yet. soon:tm:).
+1. hidden/dev apps, valve tools, mod hosts > old free games. owned-game buckets are tier 3 and stay
+   excluded until you opt in with `--allow-owned` (TUI: a consent prompt) - never auto-picked without it.
+   posture ranking between same-tier real slots: VerifiedWritable real > AutoClouded real >
+   probe-candidate, and provider/redirected activation containers (OST lua, SLS, GreenLuma) only
+   fill in once real slots run out. `--posture real,provider,redirected` filters the universe.
 2. anti-ban: server-`Denied` slots (from pool probe) are skipped. `--spread` fans files out.
    `--copies` duplicates so one purged bucket cant nuke your whole save. `--stealth` hashes names
    so they look native (the trailer still knows).

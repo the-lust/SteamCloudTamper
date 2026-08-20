@@ -105,10 +105,26 @@ public static class PoolScoring
         _ => 10,
     };
 
-    /// <summary>Older release year wins (old saves are more "dead" = safer co-tenants).</summary>
-    public static int AgeScore(int releaseYear) => Math.Clamp(2026 - releaseYear, 0, 50);
+    /// <summary>Older release year wins (old saves are more "dead" = safer co-tenants). Unknown year gets no bonus.</summary>
+    public static int AgeScore(int releaseYear) => releaseYear <= 0 ? 0 : Math.Clamp(2026 - releaseYear, 0, 50);
 
     /// <summary>Co-existence bonus: bucket already hosting other parked games = proven slot.</summary>
     public static int CoexistScore(int distinctHostedGames, int fileCount) =>
         distinctHostedGames > 0 ? 20 + Math.Min(fileCount, 25) : 0;
+
+    /// <summary>
+    /// Storage-quality bonus, per the ranking in docs/PLAN.md:
+    /// VerifiedWritable real &gt; AutoClouded real &gt; probe-candidate &gt; provider/redirected.
+    /// A null/unknown posture counts as real (curated PoolDb slots face Valve by design);
+    /// redirected / proxied / local containers are activation-class slots and get heavily
+    /// penalized so they are only chosen once real candidates are exhausted.
+    /// </summary>
+    public static int PostureScore(string? posture, bool autoClouded, string? probeState)
+    {
+        var isReal = posture is null or "real" or "provider";
+        if (!isReal) return -60;
+        if (probeState is "VerifiedWritable") return 30;
+        if (autoClouded) return 20;
+        return 10;
+    }
 }

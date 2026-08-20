@@ -7,8 +7,16 @@ screen plus gradient/glow/sine TUI effects, cleanup done (UnitTest1.cs + ApiProb
 deleted, `dist/` gitignored), one 78.8 MB self-contained `dist\SteamCloudTamper.exe`
 (double-click = TUI, flags = CLI) via `tools/publish.ps1`.
 
-Not yet built (next): `--allow-owned` parking consent + `--posture any/filters` on
-`park`, SLS/SteamTools shipping integrations, `pool discover` scoped by posture.
+SHIPPED (later): `--allow-owned` parking consent + `--posture any/filters` on `park` -
+owned-game buckets (userdata containers + OwnedReserved pool entries) are OPT-IN
+(CLI flag `--allow-owned`, TUI consent prompt) and never auto-picked without it; the
+allocator consults the discovered container universe, posture ranking is
+VerifiedWritable real > AutoClouded real > probe-candidate > provider/redirected
+(activation containers only fill in once real slots run out), `--posture <csv>` is an
+authoritative filter, `--bucket` enforces the same consent/filter checks, re-parking
+keeps a proven owned slot only with consent. 45/45 tests.
+
+Not yet built (next): SLS/SteamTools shipping integrations, `pool discover` scoped by posture.
 
 ## 1. Entitlement-driven container discovery (the core feature)
 
@@ -32,7 +40,7 @@ Policy change: owned-game buckets become OPT-IN real-cloud containers
 Ranking: VerifiedWritable real > AutoClouded real > probe-candidate >
 provider/redirected (activation containers only when real isn't available or
 `--posture any`). Barcode/spread/copies rules unchanged - containers are
-interchangeable, barcodes disambiguate.
+interchangeable, barcodes disambiguate. [DONE - commit after this doc's status line]
 
 SCT as addon/plugin: independent single exe (always works), plus shipped host hooks:
 OST `[inject]` + lua (live), CloudRedirect host (live), gbe `load_dlls`, SLS/GL config

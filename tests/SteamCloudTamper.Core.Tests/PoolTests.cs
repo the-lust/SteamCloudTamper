@@ -237,6 +237,134 @@ public class ParkingEngineTests
     }
 }
 
+public class ConsentAndPostureTests
+{
+    private static ContainerInfo Owned(uint appId) =>
+        new(appId, $"owned-{appId}", ContainerKind.Owned, ContainerSource.UserData, "real", false, "userdata bucket");
+
+    private static ContainerInfo Activation(uint appId) =>
+        new(appId, $"lua-{appId}", ContainerKind.Activation, ContainerSource.OstLua, "redirected", false, "lua hook");
+
+    private static Dictionary<uint, string> DenyAllPool() =>
+        PoolDb.Usable().ToDictionary(p => p.AppId, _ => "Denied");
+
+    [Fact]
+    public void OwnedBucketNeedsExplicitConsentWhenForced()
+    {
+        var engine = new ParkingEngine([], []);
+        var containers = new List<ContainerInfo> { Owned(2371090) };
+
+        var no = engine.Plan(91330, [new ParkFile("s.sav", 100)], forceBucket: 2371090, containers: containers);
+        Assert.False(no[0].Ok);
+        Assert.Contains("allow-owned", no[0].Reason, StringComparison.OrdinalIgnoreCase);
+
+        var yes = engine.Plan(91330, [new ParkFile("s.sav", 100)], forceBucket: 2371090,
+            containers: containers, allowOwned: true);
+        Assert.True(yes[0].Ok);
+        Assert.Equal(2371090u, yes[0].StorageAppId);
+        Assert.Equal("91330_s.sav", yes[0].StoredName);
+    }
+
+    [Fact]
+    public void OwnedBucketsAreNeverAutoPickedWithoutConsent()
+    {
+        // everything real is server-denied, so the ONLY slot left is the owned
+        // bucket - still refused until --allow-owned says otherwise
+        var engine = new ParkingEngine([], [], poolProbes: DenyAllPool());
+        var containers = new List<ContainerInfo> { Owned(2371090) };
+
+        var no = engine.Pick(91330, "s.sav", 100, containers: containers);
+        Assert.False(no.Ok);
+        Assert.Contains("allow-owned", no.Reason, StringComparison.OrdinalIgnoreCase);
+
+        var yes = engine.Pick(91330, "s.sav", 100, containers: containers, allowOwned: true);
+        Assert.True(yes.Ok);
+        Assert.Equal(2371090u, yes.StorageAppId);
+    }
+
+    [Fact]
+    public void ActivationContainersNotPickedWhileRealSlotsExist()
+    {
+        var engine = new ParkingEngine([], []);
+        var d = engine.Pick(91330, "s.sav", 100,
+            containers: new List<ContainerInfo> { Activation(588650) });
+        Assert.True(d.Ok);
+        Assert.NotEqual(588650u, d.StorageAppId);
+        Assert.Equal(SlotTier.HiddenDev, PoolDb.Find(d.StorageAppId!.Value)!.Tier);
+    }
+
+    [Fact]
+    public void ActivationContainersFillInWhenRealSlotsAreDenied()
+    {
+        // activation slots are last resort: they only win when no real candidate exists
+        var engine = new ParkingEngine([], [], poolProbes: DenyAllPool());
+        var d = engine.Pick(91330, "s.sav", 100,
+            containers: new List<ContainerInfo> { Activation(588650) });
+        Assert.True(d.Ok);
+        Assert.Equal(588650u, d.StorageAppId);
+        Assert.Equal("91330_s.sav", d.StoredName);
+    }
+
+    [Fact]
+    public void PostureFilterRestrictsTheUniverse()
+    {
+        var engine = new ParkingEngine([], []);
+        var containers = new List<ContainerInfo> { Activation(588650) };
+
+        // only redirected allowed -> pool slots (real by default) are filtered out
+        var only = engine.Plan(91330, [new ParkFile("s.sav", 100)],
+            containers: containers, postureFilter: new HashSet<string> { "redirected" });
+        Assert.True(only[0].Ok);
+        Assert.Equal(588650u, only[0].StorageAppId);
+
+        // real only -> the activation container is filtered out, pool survives
+        var real = engine.Plan(91330, [new ParkFile("s.sav", 100)],
+            containers: containers, postureFilter: new HashSet<string> { "real" });
+        Assert.True(real[0].Ok);
+        Assert.NotEqual(588650u, real[0].StorageAppId);
+
+        // any = no filter
+        var any = engine.Plan(91330, [new ParkFile("s.sav", 100)],
+            containers: containers, postureFilter: new HashSet<string> { "any" });
+        Assert.True(any[0].Ok);
+        Assert.NotEqual(588650u, any[0].StorageAppId);
+    }
+
+    [Fact]
+    public void ForceBucketHonorsPostureFilter()
+    {
+        var engine = new ParkingEngine([], []);
+        var containers = new List<ContainerInfo> { Activation(588650) };
+        var plan = engine.Plan(91330, [new ParkFile("s.sav", 100)], forceBucket: 588650,
+            containers: containers, postureFilter: new HashSet<string> { "real" });
+        Assert.False(plan[0].Ok);
+        Assert.Contains("posture", plan[0].Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReparkKeepsOwnedSlotOnceConsentGiven()
+    {
+        var slots = new List<GameSlot>
+        {
+            GameSlot.New(91330, 2371090, "91330_save.sav", "save.sav", 10, "91330|1|01012026"),
+        };
+        var engine = new ParkingEngine([], slots);
+        var containers = new List<ContainerInfo> { Owned(2371090) };
+
+        // slot owner is an owned bucket: no consent -> reallocate elsewhere
+        var no = engine.Pick(91330, "save.sav", 1024, containers: containers);
+        Assert.True(no.Ok);
+        Assert.NotEqual(2371090u, no.StorageAppId);
+        Assert.DoesNotContain("already parked", no.Reason);
+
+        // with consent -> the proven owned slot wins again
+        var yes = engine.Pick(91330, "save.sav", 1024, containers: containers, allowOwned: true);
+        Assert.True(yes.Ok);
+        Assert.Equal(2371090u, yes.StorageAppId);
+        Assert.Contains("already parked", yes.Reason);
+    }
+}
+
 public class SteamLocatorTests
 {
     [Fact]
